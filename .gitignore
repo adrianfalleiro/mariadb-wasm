@@ -1,0 +1,6 @@
+emsdk/
+mariadb/
+build/
+node_modules/
+dist/
+*.log
