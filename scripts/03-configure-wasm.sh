@@ -19,6 +19,14 @@ if [ ! -f "$HOST_TOOLS" ]; then
 fi
 
 BUILD="$ROOT/build/wasm"
+
+# Always configure from scratch. A build dir left behind by an aborted
+# configure can end up with a CMakeCache naming the *host* compiler while
+# CMAKE_SYSTEM_NAME still says Emscripten. That state builds — with
+# /usr/bin/cc against the wasm my_config.h — and the resulting errors
+# (missing <crypt.h>, and other emscripten-only headers) read like genuine
+# portability problems. Reconfiguring is cheap; the wild goose chase is not.
+rm -rf "$BUILD"
 mkdir -p "$BUILD"
 cd "$BUILD"
 
@@ -53,5 +61,34 @@ emcmake cmake "$ROOT/mariadb" \
   -DPLUGIN_AUTH_GSSAPI=NO \
   -DPLUGIN_CRACKLIB_PASSWORD_CHECK=NO \
   2>&1 | tee "$BUILD/configure.log"
+
+# Assert we actually cross-compiled. A configure that falls back to the host
+# compiler still "succeeds", and then every later error is a lie: the host cc
+# gets pointed at the wasm my_config.h, so it reports missing <crypt.h> and
+# other headers that exist in the emscripten sysroot but not in the macOS SDK.
+# Those read as genuine portability work and are not.
+#
+# CMakeCache.txt is the authority — it is what the generated build.ninja uses.
+# CMakeFiles/<ver>/CMakeCCompiler.cmake can disagree with it, so do not
+# substitute one check for the other.
+CONFIGURED_CC="$(sed -n 's/^CMAKE_C_COMPILER:FILEPATH=//p' "$BUILD/CMakeCache.txt")"
+case "$CONFIGURED_CC" in
+  */emscripten/emcc)
+    echo "toolchain OK: $CONFIGURED_CC" ;;
+  *)
+    echo "FATAL: configure did not use emcc. Got: ${CONFIGURED_CC:-<none>}" >&2
+    echo "Delete $BUILD and re-run; do not run a second build concurrently." >&2
+    exit 1 ;;
+esac
+
+grep -q '^CMAKE_SYSTEM_NAME:.*=Emscripten$' "$BUILD/CMakeCache.txt" || {
+  echo "FATAL: configure did not set CMAKE_SYSTEM_NAME=Emscripten" >&2
+  exit 1
+}
+
+test -f "$BUILD/build.ninja" || {
+  echo "FATAL: configure produced no build.ninja" >&2
+  exit 1
+}
 
 echo "WASM_CONFIGURE_DONE"
