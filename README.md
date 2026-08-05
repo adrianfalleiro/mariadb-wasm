@@ -71,5 +71,20 @@ brew install bison ninja
 
 ## Status
 
-Spike. Nothing works end to end yet — see the git log for where the build
-currently stops.
+Spike. MariaDB's embedded server, InnoDB included, builds for
+wasm32-emscripten and runs inside Node: `CREATE TABLE ... ENGINE=InnoDB`,
+`INSERT`, `SELECT`, `START TRANSACTION` with a `ROLLBACK` that restores the
+prior value, `COMMIT` that persists it, exact `DECIMAL`, `VARBINARY` with
+embedded NULs, `DATETIME(6)` microseconds, and `1062`/`23000` error
+propagation — then a clean process exit with no pthread worker left holding the
+event loop open.
+
+The catch: startup deadlocks on roughly half of runs. Successful runs take
+~0.5s; hung runs spin forever. Pool exhaustion, the main-thread blocking
+restriction, and memory growth have each been ruled out by measurement — see
+`docs/status.md`. That race is the next thing to fix, and it is the only thing
+between here and a usable package.
+
+A native `libmariadbd` reference build and a C ABI shared by both targets are
+in place, so wasm behaviour can be diffed against native rather than guessed
+at.

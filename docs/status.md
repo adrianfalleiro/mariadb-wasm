@@ -12,8 +12,28 @@ Running log. Newest entries at the bottom of each section.
 | 3 — host generators | done | `import_executables.cmake` exports 6 host-native tools; target configure resolves them without running wasm |
 | 4 — Emscripten toolchain | done | CMake generates a Ninja graph for `mysqlserver` with `CMAKE_C_COMPILER=emcc` |
 | 5 — plugin surface | partial | Unrelated engines disabled at configure; `docs/plugin-matrix.md` not yet written |
-| 6 — compile-fix loop | in progress | `mysqlserver` links for wasm32-emscripten |
-| 7+ | not started | |
+| 6 — compile-fix loop | done | `mysqlserver` builds for wasm32-emscripten, 0 of 829 targets failing |
+| 7 — first linkable module | done | `dist/mariadb.mjs` + `mariadb.wasm`; Node instantiates and calls exports |
+| 8 — datadir bootstrap | partial | Empty MEMFS datadir suffices; no packaged template yet |
+| 9 — init under wasm | **blocked** | `SELECT 1` passes, but startup deadlocks ~50% of runs |
+| 10 — InnoDB under wasm | done, gated on 9 | Full transaction scenario passes when startup wins the race |
+| 11+ | not started | |
+
+## Verified behaviour (wasm)
+
+`node tests/wasm/smoke.mjs` — 22 assertions, all passing **on runs where
+startup succeeds**, in ~0.5s wall clock:
+
+`SELECT 1`, `CREATE DATABASE`, `CREATE TABLE ... ENGINE=InnoDB` (engine
+confirmed via `information_schema`), `INSERT`, exact `DECIMAL(20,4)`,
+`VARBINARY` with an embedded NUL, `DATETIME(6)` microseconds,
+`START TRANSACTION` / `ROLLBACK` restoring the prior value,
+`START TRANSACTION` / `COMMIT` persisting it, duplicate key as `1062`/`23000`,
+`mysql_server_end`, and Node exiting on its own with status 0 — no leftover
+pthread worker holding the event loop open (criterion 3.2.9).
+
+So the milestone in §29 of the brief is reached: *real MariaDB embedded server
+with InnoDB executing inside WebAssembly*. It is not yet dependable.
 
 ## Verified behaviour (native reference)
 
@@ -89,6 +109,59 @@ Category:    BUILD_DETECTION
 Test:        The three assertions at the end of scripts/03-configure-wasm.sh
 Commit:      (wasm configure hardening commit)
 ```
+
+### 2026-08-05 — OPEN: bistable startup deadlock in mysql_server_init
+
+```
+Date:        2026-08-05
+Phase:       9 (initialise MariaDB under wasm)
+Command:     node tests/wasm/smoke.mjs
+Symptom:     ~50% of runs never return from mdb_runtime_init. The process
+             spins at 99% CPU indefinitely (observed to 180s; killed).
+             Successful runs complete the entire scenario in ~0.5s, so this
+             is bistable, not slow.
+Subsystem:   Emscripten pthreads / MariaDB + InnoDB startup
+Category:    THREADING
+```
+
+Last event before the stall, from a `-sPTHREADS_DEBUG=1` build, is a worker
+handling `updateMemoryViews` or sitting just after `invokeEntryPoint`, with no
+further output from any thread.
+
+**Ruled out, each by measurement:**
+
+| Hypothesis | Test | Result |
+|---|---|---|
+| pthread pool exhaustion | `PTHREAD_POOL_SIZE` 8 → 16 → 32 | Still hangs. Trace shows 11 workers/13 tids needed; `PTHREAD_POOL_SIZE_STRICT=2` never fires, so the pool is not the limit |
+| Main thread cannot block (`Atomics.wait` restriction) | Ran the whole module inside a `node:worker_threads` worker (`tests/wasm/smoke-in-worker.mjs`) | 5/10, statistically identical to 4/10 direct |
+| Memory growth racing thread startup (em++ warns about `-pthread` + `ALLOW_MEMORY_GROWTH`; heap grew 128→412 MB during init) | `INITIAL_MEMORY=512MB`, verified **0** heap resizes | Still 8/12. Growth eliminated, deadlock remains |
+| Slow startup mistaken for a hang | 600s timeout | Successful runs take 0.5s; hung runs never finish |
+
+`INITIAL_MEMORY=512MB` was kept regardless: it removes all startup growth, and
+growth under `-pthread` is something em++ explicitly warns about.
+
+**Not yet tried** — in the order worth trying:
+
+1. `-sPROXY_TO_PTHREAD`, the standard remedy for a blocking main thread. Needs
+   a `main()` and proxied entry points, since exports called from JS otherwise
+   still run on the real main thread. The largest change, and the most likely
+   to be correct.
+2. Narrow which thread is stuck by instrumenting `tpool`'s
+   `create_thread_pool_generic` and InnoDB's `srv_start` directly, rather than
+   inferring from Emscripten's trace.
+3. Reduce the number of startup threads (`innodb_read_io_threads`,
+   `innodb_write_io_threads`, `innodb_purge_threads=1`) to see whether the race
+   probability scales with thread count — cheap, and would confirm or kill the
+   "InnoDB startup barrier" theory.
+4. Minimal reproducer: N threads spawned from a blocking main thread with the
+   same synchronisation shape, to determine whether this is an Emscripten bug
+   worth reporting upstream.
+
+`spike/pthread-probe.c` already showed the *steady-state* InnoDB threading
+shape works under Emscripten — four workers parked on `pthread_cond_timedwait`,
+woken, joined. So the problem is specific to startup, not to threading itself.
+
+---
 
 **Process note.** Two sessions were editing this tree at once, which produced
 the contaminated build directory above, logs whose contents changed between
