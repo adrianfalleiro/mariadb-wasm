@@ -136,6 +136,7 @@ further output from any thread.
 | Main thread cannot block (`Atomics.wait` restriction) | Ran the whole module inside a `node:worker_threads` worker (`tests/wasm/smoke-in-worker.mjs`) | 5/10, statistically identical to 4/10 direct |
 | Memory growth racing thread startup (em++ warns about `-pthread` + `ALLOW_MEMORY_GROWTH`; heap grew 128→412 MB during init) | `INITIAL_MEMORY=512MB`, verified **0** heap resizes | Still 8/12. Growth eliminated, deadlock remains |
 | Slow startup mistaken for a hang | 600s timeout | Successful runs take 0.5s; hung runs never finish |
+| Race probability scales with InnoDB's startup thread count | `--innodb-read-io-threads=1 --innodb-write-io-threads=1 --innodb-purge-threads=1` | 6/10, indistinguishable from the baseline |
 
 `INITIAL_MEMORY=512MB` was kept regardless: it removes all startup growth, and
 growth under `-pthread` is something em++ explicitly warns about.
@@ -149,11 +150,7 @@ growth under `-pthread` is something em++ explicitly warns about.
 2. Narrow which thread is stuck by instrumenting `tpool`'s
    `create_thread_pool_generic` and InnoDB's `srv_start` directly, rather than
    inferring from Emscripten's trace.
-3. Reduce the number of startup threads (`innodb_read_io_threads`,
-   `innodb_write_io_threads`, `innodb_purge_threads=1`) to see whether the race
-   probability scales with thread count — cheap, and would confirm or kill the
-   "InnoDB startup barrier" theory.
-4. Minimal reproducer: N threads spawned from a blocking main thread with the
+3. Minimal reproducer: N threads spawned from a blocking main thread with the
    same synchronisation shape, to determine whether this is an Emscripten bug
    worth reporting upstream.
 
