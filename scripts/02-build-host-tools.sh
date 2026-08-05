@@ -12,10 +12,18 @@ BUILD="$ROOT/build/host"
 mkdir -p "$BUILD"
 cd "$BUILD"
 
+# WITH_ZLIB=bundled is load-bearing, not an optimisation. The system zlib probe
+# resolves via stale .pc files to SDKs/MacOSX26.sdk (a symlink to 26.1), and
+# CMake then adds that whole usr/include as a plain -I. It lands ahead of the
+# -isysroot 26.4 C++ headers, so libc++'s <cstddef> finds 26.1's stddef.h and
+# the build dies with "didn't find libc++'s <stddef.h>".
 cmake "$ROOT/mariadb" \
   -G Ninja \
   -DCMAKE_BUILD_TYPE=Release \
-  -DWITH_UNIT_TESTS=OFF
+  -DCMAKE_OSX_SYSROOT="$(xcrun --show-sdk-path)" \
+  -DWITH_UNIT_TESTS=OFF \
+  -DWITH_ZLIB=bundled \
+  -DWITH_SSL=bundled
 
 ninja import_executables
 

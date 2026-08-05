@@ -1,0 +1,48 @@
+Force the IMPORT_EXECUTABLES cross-compile path under Emscripten.
+
+MariaDB decides how to obtain its build-time codegen tools (comp_err,
+gen_lex_hash, gen_lex_token, comp_sql, factorial, uca-dump) by checking
+whether a crosscompiling emulator is available:
+
+  CMakeLists.txt:431  IF(CMAKE_CROSSCOMPILING AND NOT DEFINED CMAKE_CROSSCOMPILING_EMULATOR)
+  CMakeLists.txt:517  IF(NOT CMAKE_CROSSCOMPILING OR DEFINED CMAKE_CROSSCOMPILING_EMULATOR)
+
+Emscripten.cmake:376 unconditionally sets CMAKE_CROSSCOMPILING_EMULATOR to
+node, so both guards resolve to "we can run target binaries" — MariaDB skips
+IMPORT_EXECUTABLES and instead compiles the tools to wasm and runs them under
+node during the build.
+
+That does not work here. Those tools generate source files, i.e. they write
+real files to the build tree, and Emscripten's default MEMFS is an in-memory
+filesystem the build system cannot see. The tools would appear to succeed and
+produce nothing.
+
+Setting -DCMAKE_CROSSCOMPILING_EMULATOR="" on the command line does not help:
+Emscripten.cmake guards its assignment with NOT DEFINED, but MariaDB's checks
+are also NOT DEFINED, so an empty-but-defined value still takes the wrong
+branch in both places.
+
+Hence an explicit opt-out: MARIADB_WASM_FORCE_IMPORT_EXECUTABLES.
+
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -428,7 +428,7 @@
+ ADD_SUBDIRECTORY(tpool)
+ CHECK_SYSTEMD()
+
+-IF(CMAKE_CROSSCOMPILING AND NOT DEFINED CMAKE_CROSSCOMPILING_EMULATOR)
++IF(CMAKE_CROSSCOMPILING AND (MARIADB_WASM_FORCE_IMPORT_EXECUTABLES OR NOT DEFINED CMAKE_CROSSCOMPILING_EMULATOR))
+   SET(IMPORT_EXECUTABLES "IMPORTFILE-NOTFOUND" CACHE FILEPATH "Path to import_executables.cmake from a native build")
+   INCLUDE(${IMPORT_EXECUTABLES})
+ ENDIF()
+@@ -514,7 +514,7 @@
+ INCLUDE(for_clients)
+ ADD_SUBDIRECTORY(scripts)
+ ADD_SUBDIRECTORY(support-files)
+ ADD_SUBDIRECTORY(extra/aws_sdk)
+
+-IF(NOT CMAKE_CROSSCOMPILING OR DEFINED CMAKE_CROSSCOMPILING_EMULATOR)
++IF(NOT CMAKE_CROSSCOMPILING OR (DEFINED CMAKE_CROSSCOMPILING_EMULATOR AND NOT MARIADB_WASM_FORCE_IMPORT_EXECUTABLES))
+   SET(EXPORTED comp_err comp_sql factorial uca-dump)
+   IF(NOT WITHOUT_SERVER)
+     SET(EXPORTED ${EXPORTED} gen_lex_hash gen_lex_token)

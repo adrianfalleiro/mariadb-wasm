@@ -27,6 +27,7 @@ FLAGS="-pthread -O2 -fno-strict-aliasing"
 
 emcmake cmake "$ROOT/mariadb" \
   -G Ninja \
+  -DMARIADB_WASM_FORCE_IMPORT_EXECUTABLES=ON \
   -DIMPORT_EXECUTABLES="$HOST_TOOLS" \
   -DCMAKE_BUILD_TYPE=Release \
   -DCMAKE_C_FLAGS="$FLAGS" \
