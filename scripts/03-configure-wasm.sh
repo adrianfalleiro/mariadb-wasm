@@ -36,7 +36,7 @@ emcmake cmake "$ROOT/mariadb" \
   -DWITH_EMBEDDED_SERVER=ON \
   -DWITH_UNIT_TESTS=OFF \
   -DWITH_SSL=bundled \
-  -DCONC_WITH_SSL=OFF \
+  -DCONC_WITH_SSL=NONE \
   -DWITH_ZLIB=bundled \
   -DWITH_PCRE=bundled \
   -DWITHOUT_DYNAMIC_PLUGINS=ON \
