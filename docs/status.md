@@ -8,7 +8,7 @@ Running log. Newest entries at the bottom of each section.
 |---|---|---|
 | 0 — inspect and pin | done | Revision pinned, embedded target and its merge set identified — `docs/source-inventory.md` |
 | 1 — native `libmariadbd` | done | `libmariadbd.a` builds; native smoke test passes the InnoDB transaction scenario |
-| 2 — C ABI | not started | Same wrapper builds and passes the native smoke test |
+| 2 — C ABI | done | Wrapper builds against native libmariadbd; `12-run-abi-smoke.sh` passes 39 assertions |
 | 3 — host generators | done | `import_executables.cmake` exports 6 host-native tools; target configure resolves them without running wasm |
 | 4 — Emscripten toolchain | done | CMake generates a Ninja graph for `mysqlserver` with `CMAKE_C_COMPILER=emcc` |
 | 5 — plugin surface | partial | Unrelated engines disabled at configure; `docs/plugin-matrix.md` not yet written |
@@ -99,11 +99,15 @@ Ruled out:   cmake_minimum_required(2.8.12) vs 3.10 — minimal reproducer picks
              emcc for both. Our -D flag set — bisected in two groups, both pick
              emcc. A bare `emcmake cmake mariadb` also picks emcc.
 Correction:  scripts/03-configure-wasm.sh now (a) rm -rf's the build dir before
-             configuring and (b) asserts CMAKE_C_COMPILER in CMakeCache.txt is
-             emcc, CMAKE_SYSTEM_NAME is Emscripten, and build.ninja exists.
-             CMakeCache.txt is the authority — it is what build.ninja is
-             generated from — so the cache check is not interchangeable with
-             the CMakeCCompiler.cmake one.
+             configuring and (b) asserts the toolchain afterwards.
+             Note on where to check, since the first attempt got this wrong:
+             when a toolchain file sets the compiler, CMake does NOT write
+             CMAKE_C_COMPILER to CMakeCache.txt at all - it goes to
+             CMakeFiles/<ver>/CMakeCCompiler.cmake. A cached
+             CMAKE_C_COMPILER:FILEPATH is itself the smell, since it means
+             CMake ran its own search and found the host toolchain. The
+             end-to-end assertion is that build.ninja contains no host
+             compiler invocation, which is what ninja actually executes.
 Semantics:   None.
 Category:    BUILD_DETECTION
 Test:        The three assertions at the end of scripts/03-configure-wasm.sh
