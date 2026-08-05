@@ -33,6 +33,19 @@ cd "$BUILD"
 # -pthread must be on compile AND link for emscripten.
 FLAGS="-pthread -O2 -fno-strict-aliasing"
 
+# _GNU_SOURCE: MariaDB sets this from cmake/os/Linux.cmake, which the Emscripten
+# platform never reaches. It is not Linux-specific in practice — emscripten's
+# musl-derived headers use it as the standard gate for the same extensions, and
+# without it pthread_getattr_np is detected by the link test (the symbol does
+# exist) but left undeclared by <pthread.h>, so mysys/my_stack.c fails to
+# compile. Defining it keeps real thread stack bounds, which the SQL parser's
+# recursion guard depends on, instead of MariaDB's approximate fallback.
+#
+# ENABLE_DTRACE: cmake/dtrace.cmake turns this on because the *host* has
+# /usr/sbin/dtrace, then generates a Darwin-flavoured probes header whose
+# `__asm__ volatile(".reference ...")` cannot be assembled for wasm. DTrace
+# probes are observability only, so switching them off costs nothing here.
+
 emcmake cmake "$ROOT/mariadb" \
   -G Ninja \
   -DMARIADB_WASM_FORCE_IMPORT_EXECUTABLES=ON \
@@ -41,6 +54,8 @@ emcmake cmake "$ROOT/mariadb" \
   -DCMAKE_BUILD_TYPE=Release \
   -DCMAKE_C_FLAGS="$FLAGS" \
   -DCMAKE_CXX_FLAGS="$FLAGS" \
+  -D_GNU_SOURCE=1 \
+  -DENABLE_DTRACE=OFF \
   -DWITH_EMBEDDED_SERVER=ON \
   -DWITH_UNIT_TESTS=OFF \
   -DWITH_SSL=bundled \
@@ -68,27 +83,33 @@ emcmake cmake "$ROOT/mariadb" \
 # other headers that exist in the emscripten sysroot but not in the macOS SDK.
 # Those read as genuine portability work and are not.
 #
-# CMakeCache.txt is the authority — it is what the generated build.ninja uses.
-# CMakeFiles/<ver>/CMakeCCompiler.cmake can disagree with it, so do not
-# substitute one check for the other.
-CONFIGURED_CC="$(sed -n 's/^CMAKE_C_COMPILER:FILEPATH=//p' "$BUILD/CMakeCache.txt")"
-case "$CONFIGURED_CC" in
-  */emscripten/emcc)
-    echo "toolchain OK: $CONFIGURED_CC" ;;
-  *)
-    echo "FATAL: configure did not use emcc. Got: ${CONFIGURED_CC:-<none>}" >&2
-    echo "Delete $BUILD and re-run; do not run a second build concurrently." >&2
-    exit 1 ;;
-esac
-
-grep -q '^CMAKE_SYSTEM_NAME:.*=Emscripten$' "$BUILD/CMakeCache.txt" || {
-  echo "FATAL: configure did not set CMAKE_SYSTEM_NAME=Emscripten" >&2
-  exit 1
-}
-
+# Note on where to look: when a toolchain file sets CMAKE_C_COMPILER, CMake
+# does *not* write it to CMakeCache.txt — it lands in
+# CMakeFiles/<ver>/CMakeCCompiler.cmake instead. A cached
+# CMAKE_C_COMPILER:FILEPATH is itself the smell, because it means CMake ran its
+# own compiler search and found the host toolchain.
 test -f "$BUILD/build.ninja" || {
   echo "FATAL: configure produced no build.ninja" >&2
   exit 1
 }
+
+DETECTED=$(grep -hE '^set\(CMAKE_C_COMPILER ' "$BUILD"/CMakeFiles/*/CMakeCCompiler.cmake 2>/dev/null | head -1)
+case "$DETECTED" in
+  *emsdk*emcc*) echo "toolchain OK: $DETECTED" ;;
+  *)
+    echo "FATAL: configure did not use emcc. Got: ${DETECTED:-<none>}" >&2
+    echo "Delete $BUILD and re-run; do not run a second build concurrently." >&2
+    exit 1 ;;
+esac
+
+# The end-to-end invariant, and the one that would have caught the contaminated
+# build dir directly: nothing in the generated build may invoke the host
+# compiler. Checked against build.ninja rather than against any intermediate,
+# because build.ninja is what ninja actually executes.
+if grep -q "CommandLineTools/usr/bin/cc \|/usr/bin/clang " "$BUILD/build.ninja"; then
+  echo "FATAL: build.ninja invokes the host compiler" >&2
+  grep -o "[^ ]*usr/bin/cc " "$BUILD/build.ninja" | sort -u | head >&2
+  exit 1
+fi
 
 echo "WASM_CONFIGURE_DONE"

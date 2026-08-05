@@ -138,4 +138,107 @@ else:
     print("applied: no-TLS branch")
 PY
 
+# ---------------------------------------------------------------------------
+# 4. get_password.c: include <ctype.h> for iscntrl/isspace.
+#
+# The file uses both but relies on some other header pulling in <ctype.h>
+# transitively, which happens on glibc and on macOS but not under emscripten.
+# Nothing platform-specific about the fix - the include is simply missing.
+python3 - "$SRC/mysys/get_password.c" <<'PY'
+import pathlib, sys
+
+path = pathlib.Path(sys.argv[1])
+text = path.read_text()
+
+if "#include <ctype.h>" in text:
+    print("already applied: get_password ctype.h")
+    sys.exit()
+
+# The file includes MariaDB's <m_ctype.h>, which is charset handling and does
+# not declare the libc ctype functions.
+anchor = "#include <m_ctype.h>"
+if anchor not in text:
+    sys.exit("PATCH FAILED - anchor not found: get_password.c m_ctype.h include")
+
+path.write_text(text.replace(anchor, anchor + "\n#include <ctype.h>", 1))
+print("applied: get_password ctype.h")
+PY
+
+# ---------------------------------------------------------------------------
+# 5. my_largepage.c: include my_bit.h whenever MAP_HUGETLB is defined.
+#
+# my_bit.h is included under `#if defined(__linux__) || defined(MAP_ALIGNED)`,
+# but my_bit_log2_size_t() is *used* under `#if defined(MAP_HUGETLB)`. On Linux
+# those coincide. Emscripten defines MAP_HUGETLB in <sys/mman.h> while being
+# neither __linux__ nor MAP_ALIGNED, so the use compiles without the
+# declaration. Widening the include condition to match the use is the whole
+# fix; it does not enable large pages, which stay off unless the server is
+# started with --large-pages, and emscripten's mmap would refuse MAP_HUGETLB
+# anyway - MariaDB already falls back to an ordinary mmap in that case.
+python3 - "$SRC/mysys/my_largepage.c" <<'PY'
+import pathlib, sys
+
+path = pathlib.Path(sys.argv[1])
+text = path.read_text()
+
+old = '#if defined(__linux__) || defined(MAP_ALIGNED)\n#include "my_bit.h"\n#endif'
+new = ('#if defined(__linux__) || defined(MAP_ALIGNED) || defined(MAP_HUGETLB)\n'
+       '#include "my_bit.h"\n#endif')
+
+if new in text:
+    print("already applied: my_largepage my_bit.h guard")
+elif old not in text:
+    sys.exit("PATCH FAILED - anchor not found: my_largepage my_bit.h include")
+else:
+    path.write_text(text.replace(old, new, 1))
+    print("applied: my_largepage my_bit.h guard")
+PY
+
+# ---------------------------------------------------------------------------
+# 6. Forward the toolchain file into the bundled pcre2 ExternalProject.
+#
+# pcre.cmake passes -DCMAKE_C_COMPILER=${CMAKE_C_COMPILER} but not the
+# toolchain file, so the sub-build gets emcc while still believing it is
+# targeting the host. On macOS that means CMake's Darwin platform module
+# appends `-arch arm64 -isysroot .../MacOSX.sdk`, and emcc rejects -arch with
+# "unsupported option '-arch' for target 'wasm32-unknown-emscripten'" - the
+# sub-project's own compiler test fails before pcre2 builds a single file.
+#
+# Forwarding CMAKE_TOOLCHAIN_FILE is the general fix: the sub-build then
+# resolves its platform the same way the parent did. Guarded so native builds,
+# which pass no toolchain file, are unaffected.
+python3 - "$SRC/cmake/pcre.cmake" <<'PY'
+import pathlib, sys
+
+path = pathlib.Path(sys.argv[1])
+text = path.read_text()
+
+if "pcre2_cross_args" in text:
+    print("already applied: pcre2 toolchain forwarding")
+    sys.exit()
+
+anchor = "  ExternalProject_Add(\n    pcre2\n"
+if anchor not in text:
+    sys.exit("PATCH FAILED - anchor not found: pcre2 ExternalProject_Add")
+
+preamble = """  SET(pcre2_cross_args)
+  IF(CMAKE_TOOLCHAIN_FILE)
+    # Without this the sub-build uses our compiler but the host's platform
+    # module, and appends flags the target compiler cannot accept.
+    LIST(APPEND pcre2_cross_args
+      "-DCMAKE_TOOLCHAIN_FILE=${CMAKE_TOOLCHAIN_FILE}")
+  ENDIF()
+
+"""
+text = text.replace(anchor, preamble + anchor, 1)
+
+args_anchor = '      "-DCMAKE_C_COMPILER=${CMAKE_C_COMPILER}"\n'
+if args_anchor not in text:
+    sys.exit("PATCH FAILED - anchor not found: pcre2 CMAKE_C_COMPILER arg")
+
+text = text.replace(args_anchor, args_anchor + "      ${pcre2_cross_args}\n", 1)
+path.write_text(text)
+print("applied: pcre2 toolchain forwarding")
+PY
+
 echo "PATCH_DONE"
