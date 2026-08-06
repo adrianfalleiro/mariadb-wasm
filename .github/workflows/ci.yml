@@ -1,0 +1,152 @@
+# Rebuilds everything from a clean checkout and runs all four suites.
+#
+# Ubuntu rather than macOS: the build works on both, but the runners are far
+# faster and the macOS-specific workarounds in the scripts (bundled zlib to
+# dodge the SDK header clash, Homebrew bison) are no-ops here.
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+# build/ and the in-place-patched mariadb/ checkout are shared mutable state
+# with no locking. Two jobs on one workspace corrupt each other in ways that
+# surface as impossible compiler errors, so overlapping runs are cancelled.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build-and-test:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            bison ninja-build cmake libncurses-dev
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+
+      # Pinned, not "latest": the emsdk version is part of the build identity
+      # and is recorded in the manifest.
+      - name: Cache emsdk
+        id: cache-emsdk
+        uses: actions/cache@v4
+        with:
+          path: emsdk
+          key: emsdk-6.0.5-${{ runner.os }}
+
+      - name: Install emsdk
+        if: steps.cache-emsdk.outputs.cache-hit != 'true'
+        run: |
+          git clone --depth 1 https://github.com/emscripten-core/emsdk.git emsdk
+          cd emsdk
+          ./emsdk install 6.0.5
+          ./emsdk activate 6.0.5
+
+      - name: Fetch MariaDB
+        run: bash scripts/01-fetch-mariadb.sh
+
+      - name: Validate patches
+        run: |
+          bash scripts/02b-patch-mariadb.sh
+          # Idempotent by contract: a second run must report everything as
+          # already applied and change nothing. If an anchor moved, the script
+          # exits non-zero rather than silently skipping the patch.
+          bash scripts/02b-patch-mariadb.sh
+
+      - name: Build host generator tools
+        run: bash scripts/02-build-host-tools.sh
+
+      - name: Check the import file points inside the workspace
+        run: |
+          python3 - <<'PY'
+          import pathlib, re, sys
+          text = pathlib.Path("build/host/import_executables.cmake").read_text()
+          paths = re.findall(r'IMPORTED_LOCATION "([^"]+)"', text)
+          if not paths:
+              sys.exit("no imported executables found")
+          workspace = str(pathlib.Path.cwd().resolve())
+          for path in paths:
+              if not path.startswith(workspace):
+                  sys.exit(f"imported executable outside the workspace: {path}")
+              if not pathlib.Path(path).exists():
+                  sys.exit(f"imported executable missing: {path}")
+          print(f"{len(paths)} host tools, all present and inside the workspace")
+          PY
+
+      - name: Build native reference
+        run: bash scripts/10-build-native-reference.sh
+
+      - name: Native smoke test
+        run: bash scripts/11-run-native-smoke.sh
+
+      - name: Native C ABI smoke test
+        run: bash scripts/12-run-abi-smoke.sh
+
+      - name: Configure wasm
+        run: bash scripts/03-configure-wasm.sh
+
+      - name: Build wasm
+        run: bash scripts/04-build-wasm.sh
+
+      - name: Link the wasm module
+        run: bash scripts/05-link-wasm-module.sh release
+
+      # Exported symbols are generated from the C header. If the header and the
+      # module ever disagree the failure is a runtime "function not exported"
+      # inside a test worker, which is a miserable way to find out.
+      - name: Check exports match the ABI header
+        run: |
+          python3 - <<'PY'
+          import json, pathlib, subprocess, sys
+          expected = json.loads(
+              subprocess.run(["bash", "scripts/gen-exports.sh"],
+                             capture_output=True, text=True, check=True).stdout)
+          module = pathlib.Path("dist/mariadb.mjs").read_text()
+          missing = [name for name in expected
+                     if name not in module and name.lstrip("_") not in module]
+          if missing:
+              sys.exit(f"declared in the header but not exported: {missing}")
+          print(f"{len(expected)} exports present")
+          PY
+
+      - name: Wasm smoke test
+        run: node tests/wasm/smoke.mjs
+
+      # The startup deadlock was bistable at roughly 50%, so a single green run
+      # proved nothing. Repeating is the regression test.
+      - name: Wasm startup determinism (10 runs)
+        run: |
+          for i in $(seq 1 10); do
+            timeout 120 node tests/wasm/smoke.mjs > /dev/null || {
+              echo "run $i failed"; exit 1; }
+          done
+          echo "10/10 startups succeeded"
+
+      - name: Differential suite (native vs wasm)
+        run: bash scripts/13-run-differential.sh
+
+      - name: Package test suite
+        run: cd package && node --test 'test/*.test.ts'
+
+      - name: Show the build manifest
+        run: cat dist/build-manifest.json
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: mariadb-wasm-dist
+          path: |
+            dist/mariadb.mjs
+            dist/mariadb.wasm
+            dist/build-manifest.json
+            dist/share/**
+            dist/charsets/**
