@@ -2,6 +2,8 @@
 #include "internal.h"
 
 #include <cstring>
+#include <memory>
+#include <pthread.h>
 
 extern "C" {
 
@@ -183,6 +185,151 @@ int mdb_connection_last_error(mdb_connection_handle connection,
   return MDB_OK;
 
   MDB_GUARD_END(MDB_ERR_INTERNAL)
+}
+
+}  // extern "C"
+
+namespace mdb {
+namespace {
+
+/* Handed to the worker thread; owns nothing the caller frees. */
+struct AsyncQueryJob {
+  mdb_connection_handle handle;
+};
+
+/*
+  Executes one already-staged query for a connection, on its own thread.
+
+  The connection handle is re-resolved here rather than captured as a pointer:
+  by the time this runs, the caller may have closed the connection, and the
+  handle table turns that into a lookup miss instead of a dangling pointer.
+*/
+void *async_query_entry(void *raw) {
+  std::unique_ptr<AsyncQueryJob> job(static_cast<AsyncQueryJob *>(raw));
+
+  /* Every thread that touches the client API must register with mysys, and
+     must unregister before it exits - a thread that skips my_thread_end is
+     exactly what makes mysql_server_end wait out its full timeout. */
+  mysql_thread_init();
+
+  Connection *conn = connections().get(job->handle);
+  if (conn) {
+    int status = MDB_OK;
+    mdb_result_handle produced = MDB_INVALID_HANDLE;
+
+    try {
+      conn->clear_error();
+      const std::string &sql = conn->async_sql;
+
+      if (mysql_real_query(conn->mysql, sql.data(),
+                           static_cast<unsigned long>(sql.size())) != 0) {
+        conn->capture_error();
+        status = MDB_ERR_MYSQL;
+      } else {
+        MYSQL_RES *res = mysql_store_result(conn->mysql);
+        if (!res) {
+          if (mysql_field_count(conn->mysql) != 0) {
+            conn->capture_error();
+            status = MDB_ERR_MYSQL;
+          }
+        } else {
+          auto wrapper = std::unique_ptr<Result>(new Result());
+          wrapper->res = res;
+          wrapper->column_count = mysql_num_fields(res);
+          wrapper->fields = mysql_fetch_fields(res);
+          produced = results().insert(std::move(wrapper));
+          if (produced == MDB_INVALID_HANDLE)
+            status = MDB_ERR_NO_MEMORY;
+        }
+      }
+    } catch (...) {
+      status = MDB_ERR_INTERNAL;
+    }
+
+    conn->async_status = status;
+    conn->async_result = produced;
+    /* Release: a poller that sees state 2 must also see status and result. */
+    conn->async_state.store(2, std::memory_order_release);
+  }
+
+  mysql_thread_end();
+  return nullptr;
+}
+
+}  // namespace
+}  // namespace mdb
+
+extern "C" {
+
+int mdb_connection_query_async(mdb_connection_handle connection,
+                               const uint8_t *sql,
+                               size_t sql_length) {
+  MDB_GUARD_BEGIN
+
+  mdb::Connection *conn = mdb::connections().get(connection);
+  if (!conn)
+    return MDB_ERR_BAD_HANDLE;
+  if (!sql && sql_length != 0)
+    return MDB_ERR_BAD_HANDLE;
+
+  if (conn->async_state.load(std::memory_order_acquire) == 1) {
+    conn->last_errno = 0;
+    conn->last_sql_state = "HY000";
+    conn->last_message = "a query is already in flight on this connection";
+    return MDB_ERR_BAD_STATE;
+  }
+
+  /* Copied on the caller's thread: the caller frees its buffer as soon as
+     this returns. */
+  conn->async_sql.assign(reinterpret_cast<const char *>(sql), sql_length);
+  conn->async_status = MDB_OK;
+  conn->async_result = MDB_INVALID_HANDLE;
+  conn->async_state.store(1, std::memory_order_release);
+
+  auto job = std::unique_ptr<mdb::AsyncQueryJob>(new mdb::AsyncQueryJob{connection});
+
+  pthread_t thread;
+  if (pthread_create(&thread, nullptr, mdb::async_query_entry, job.get()) != 0) {
+    conn->async_state.store(0, std::memory_order_release);
+    conn->last_sql_state = "HY000";
+    conn->last_message = "could not create a thread for the query";
+    return MDB_ERR_INTERNAL;
+  }
+  job.release();
+  pthread_detach(thread);
+
+  return MDB_OK;
+
+  MDB_GUARD_END(MDB_ERR_INTERNAL)
+}
+
+int mdb_connection_query_poll(mdb_connection_handle connection,
+                              mdb_result_handle *result) {
+  MDB_GUARD_BEGIN
+
+  if (result)
+    *result = MDB_INVALID_HANDLE;
+
+  mdb::Connection *conn = mdb::connections().get(connection);
+  if (!conn)
+    return -MDB_ERR_BAD_HANDLE;
+
+  switch (conn->async_state.load(std::memory_order_acquire)) {
+    case 1:
+      return 0;
+    case 2: {
+      conn->async_state.store(0, std::memory_order_release);
+      if (conn->async_status != MDB_OK)
+        return -conn->async_status;
+      if (result)
+        *result = conn->async_result;
+      return 1;
+    }
+    default:
+      return -MDB_ERR_BAD_STATE;
+  }
+
+  MDB_GUARD_END(-MDB_ERR_INTERNAL)
 }
 
 }  // extern "C"

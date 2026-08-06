@@ -137,6 +137,32 @@ int mdb_connection_query(mdb_connection_handle connection,
                          size_t sql_length,
                          mdb_result_handle *result);
 
+/*
+  Runs the same statement on a dedicated thread and returns immediately; poll
+  with mdb_connection_query_poll.
+
+  Needed for two reasons. First, concurrency: two connections driven from one
+  JavaScript thread cannot contend, because the first blocking call owns the
+  thread and the other transaction never reaches its COMMIT - so lock waits
+  can only ever time out, and deadlocks cannot form at all. Second, it keeps
+  the caller's thread free, which under wasm is the thread that services
+  MariaDB's proxied filesystem syscalls.
+
+  One query at a time per connection: a second submission while one is in
+  flight returns MDB_ERR_BAD_STATE rather than corrupting the protocol state.
+*/
+int mdb_connection_query_async(mdb_connection_handle connection,
+                               const uint8_t *sql,
+                               size_t sql_length);
+
+/*
+  0 = still running, 1 = finished (result in *result, which may be
+  MDB_INVALID_HANDLE for statements returning no rows), negative = -mdb_status
+  with detail available from mdb_connection_last_error.
+*/
+int mdb_connection_query_poll(mdb_connection_handle connection,
+                              mdb_result_handle *result);
+
 uint64_t mdb_connection_affected_rows(mdb_connection_handle connection);
 uint64_t mdb_connection_insert_id(mdb_connection_handle connection);
 uint32_t mdb_connection_warning_count(mdb_connection_handle connection);

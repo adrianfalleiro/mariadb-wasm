@@ -52,10 +52,14 @@ RUNTIME_METHODS='["ccall","cwrap","HEAPU8","HEAPU32","UTF8ToString","stringToUTF
 # the event loop (see mdb_runtime_init_async), so the runtime has to outlive
 # it. Node still exits on its own once the pthread workers are gone.
 #
-# PTHREAD_POOL_SIZE_STRICT=2 turns pool exhaustion into a visible error rather
-# than a silent deadlock. InnoDB starts its background threads during
-# srv_start, before any query runs, so an undersized pool would otherwise hang
-# at init with no output.
+# PTHREAD_POOL_SIZE covers the ~11 workers a MariaDB startup needs plus
+# headroom for the per-query threads the async path creates.
+#
+# STRICT is 0, not 2. It was 2 while the startup deadlock was being chased, to
+# turn pool exhaustion into a visible error rather than a silent hang. That is
+# now the wrong trade: every call that could exhaust the pool returns to the
+# event loop first, so Emscripten can spawn another worker on demand, and
+# aborting instead would turn a survivable moment of load into a crash.
 #
 # Memory is set explicitly, not left to defaults. MariaDB's static data alone
 # is ~19.8 MB, over Emscripten's 16 MB default, so the link fails outright
@@ -103,7 +107,7 @@ em++ -std=c++17 \
   -sINITIAL_MEMORY=160MB \
   -sMAXIMUM_MEMORY=2GB \
   -sPTHREAD_POOL_SIZE=16 \
-  -sPTHREAD_POOL_SIZE_STRICT=2 \
+  -sPTHREAD_POOL_SIZE_STRICT=0 \
   -sEXIT_RUNTIME=0 \
   -sFORCE_FILESYSTEM=1 \
   -sSTACK_SIZE=4MB \

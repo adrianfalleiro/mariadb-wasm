@@ -4,6 +4,7 @@
 
 #include <mysql.h>
 
+#include <atomic>
 #include <string>
 #include <vector>
 
@@ -20,6 +21,24 @@ struct Connection {
   uint32_t last_errno = 0;
   std::string last_sql_state;
   std::string last_message;
+
+  /*
+    Async execution state.
+
+    Two connections cannot contend for a row lock while both are driven from
+    one JavaScript thread: the first blocking call owns the thread, so the
+    other transaction can never reach its COMMIT. Running a query on its own
+    thread is what makes real concurrency - and therefore deadlock detection,
+    and lock waits that resolve rather than time out - expressible at all.
+
+    One query at a time per connection. The MariaDB client API does not
+    support concurrent calls on a single connection, and pretending otherwise
+    would corrupt the protocol state rather than fail cleanly.
+  */
+  std::atomic<int> async_state{0};   /* 0 idle, 1 running, 2 finished */
+  int async_status = MDB_OK;
+  mdb_result_handle async_result = 0;
+  std::string async_sql;
 
   ~Connection();
 

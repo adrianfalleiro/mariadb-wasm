@@ -61,12 +61,15 @@ export class Connection implements EmbeddedMariaDbConnection {
        text protocol accepts multi-statement and utility SQL that the
        statement protocol rejects, so preparing unconditionally would narrow
        what query() can run. */
-    if (!parameters || parameters.length === 0) return this.#runText(sql);
+    if (!parameters || parameters.length === 0) return await this.#runText(sql);
     return this.#runPrepared(sql, parameters);
   }
 
-  #runText(sql: string): QueryResult {
-    const resultHandle = this.#runtime.connectionQuery(this.#handle, sql);
+  async #runText(sql: string): Promise<QueryResult> {
+    const resultHandle = await this.#runtime.connectionQueryAsync(
+      this.#handle,
+      sql,
+    );
 
     const affectedRows = this.#runtime.affectedRows(this.#handle);
     const insertId = BigInt(this.#runtime.insertId(this.#handle));

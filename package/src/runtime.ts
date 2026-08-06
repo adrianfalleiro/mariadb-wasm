@@ -289,6 +289,59 @@ export class WasmRuntime {
     }
   }
 
+  /*
+    Runs a query on its own thread and polls from the event loop.
+
+    This is the default rather than the synchronous path for two reasons.
+
+    Concurrency: a blocking call owns the JavaScript thread, so two
+    connections contending for a row lock could never resolve - the holder
+    can't reach its COMMIT while the waiter is blocking. Deadlocks could not
+    form either, so InnoDB's detector never got a chance to run.
+
+    Safety: it keeps the main thread free, and under wasm that is the thread
+    servicing MariaDB's proxied filesystem syscalls. That is the same hazard
+    that made startup a coin flip.
+
+    Cost is ~77us per query against ~20us synchronous, measured over 1000
+    round trips. Worth it to make a whole class of hangs impossible.
+
+    setImmediate, not setTimeout: Node clamps even setTimeout(0) to roughly a
+    millisecond, which measured 1156ms for the same 1000 queries.
+  */
+  async connectionQueryAsync(handle: number, sql: string): Promise<number> {
+    const bytes = encoder.encode(sql);
+    const sqlPtr = this.#allocBytes(bytes);
+
+    try {
+      const submitted = this.#call(
+        "mdb_connection_query_async",
+        ["number", "number", "number"],
+        [handle, sqlPtr, bytes.length],
+      );
+      if (submitted !== MDB_OK) throw this.connectionError(handle, sql);
+    } finally {
+      /* The ABI copies the SQL on this thread before returning. */
+      this.#free(sqlPtr);
+    }
+
+    const outPtr = this.#module._malloc(4);
+    try {
+      for (;;) {
+        const poll = this.#call(
+          "mdb_connection_query_poll",
+          ["number", "number"],
+          [handle, outPtr],
+        );
+        if (poll === 1) return this.#u32[outPtr >> 2];
+        if (poll < 0) throw this.connectionError(handle, sql);
+        await new Promise((resolve) => setImmediate(resolve));
+      }
+    } finally {
+      this.#free(outPtr);
+    }
+  }
+
   connectionError(handle: number, sql?: string): MariaDbEmbeddedError {
     const error = this.#readError("mdb_connection_last_error", handle);
     return new MariaDbEmbeddedError(error.message || "MariaDB reported an error", {
