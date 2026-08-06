@@ -57,9 +57,10 @@ Honest list of what an acceptance review would still find:
   THIRDPARTY, with a README naming each component. The *review* in
   `docs/licensing.md` is still outstanding — the notices are the mechanical
   part of the obligation, not the legal one.
-- **CI has never been executed.** The workflow is written against Ubuntu but
-  the build scripts carry macOS assumptions (`clang++`, `-liconv`, `xcrun`).
-  Every result quoted in this repository comes from a macOS arm64 host.
+- **CI has never been executed.** The macOS assumptions are gone — host
+  differences live in `scripts/lib/platform.sh` and both branches are
+  exercised — but the workflow itself has still never run, so every result
+  quoted in this repository comes from a single macOS arm64 host.
 
 ## Verified behaviour (wasm)
 
