@@ -22,7 +22,7 @@ Running log. Newest entries at the bottom of each section.
 | 13 — differential suite | done | 97 statements across 14 cases agree, with a negative control |
 | 14 — runner integration | done | Four concurrent servers isolated; helpers added |
 | 15 — performance | partial | Shutdown fixed (45×); plugin trimming not done — `docs/performance.md` |
-| 16 — CI | done | `.github/workflows/ci.yml` rebuilds from clean and runs all suites |
+| 16 — CI | **written, unverified** | `.github/workflows/ci.yml` exists but has never run. It would fail today: the smoke scripts invoke `clang++` (not installed by the workflow) and link `-liconv` (glibc has iconv built in, so there is no such library), and `xcrun` is macOS-only |
 
 ## Remaining gaps
 
@@ -42,6 +42,9 @@ Honest list of what an acceptance review would still find:
   dedicated thread.
 - **~1 GB RSS** after a workload, uninvestigated.
 - **`dist/` ships no licence notices** — see `docs/licensing.md`.
+- **CI has never been executed.** The workflow is written against Ubuntu but
+  the build scripts carry macOS assumptions (`clang++`, `-liconv`, `xcrun`).
+  Every result quoted in this repository comes from a macOS arm64 host.
 
 ## Verified behaviour (wasm)
 
