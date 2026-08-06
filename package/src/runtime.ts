@@ -3,6 +3,7 @@
   method per C ABI entry point. Everything above this file works in handles
   and JavaScript values; everything below is pointers.
 */
+import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -24,6 +25,8 @@ interface EmscriptenModule {
   UTF8ToString(ptr: number): string;
   FS: {
     mkdirTree(path: string): void;
+    writeFile(path: string, data: Uint8Array): void;
+    readdir(path: string): string[];
     mount(type: unknown, opts: unknown, mountpoint: string): void;
     unmount(mountpoint: string): void;
   };
@@ -116,6 +119,46 @@ export class WasmRuntime {
 
   mkdirTree(dir: string) {
     this.#module.FS.mkdirTree(dir);
+  }
+
+  /*
+    Copies a datadir template from the host into this instance's filesystem.
+
+    Copied, not mounted: the datadir is written to constantly, and every
+    instance needs its own. NODEFS would share one directory between them and
+    persist changes past the process.
+
+    Returns false when there is no template, so a checkout that has not run
+    scripts/06-build-datadir-template.sh still works - it just starts from an
+    empty datadir with no mysql.* system tables, which is what the project did
+    before the template existed.
+  */
+  copyTemplate(templateDir: string, datadir: string, skip: readonly string[] = []): boolean {
+    if (!fs.existsSync(templateDir)) return false;
+
+    const { FS } = this.#module;
+    FS.mkdirTree(datadir);
+
+    const walk = (hostDir: string, vfsDir: string) => {
+      for (const entry of fs.readdirSync(hostDir, { withFileTypes: true })) {
+        if (skip.includes(entry.name)) continue;
+        const hostPath = path.join(hostDir, entry.name);
+        const vfsPath = `${vfsDir}/${entry.name}`;
+        if (entry.isDirectory()) {
+          FS.mkdirTree(vfsPath);
+          walk(hostPath, vfsPath);
+        } else if (entry.isFile()) {
+          FS.writeFile(vfsPath, fs.readFileSync(hostPath));
+        }
+      }
+    };
+
+    walk(templateDir, datadir);
+    return true;
+  }
+
+  get distDir(): string {
+    return this.#distDir;
   }
 
   mountNodeFs(hostDirectory: string, mountpoint: string) {
