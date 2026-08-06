@@ -206,6 +206,19 @@ export class WasmRuntime {
   }
 
   shutdown(): number {
+    /*
+      Skip MariaDB's wait for threads to finish. Exactly one thread never
+      calls my_thread_end under wasm, so the wait always runs its full 5
+      seconds — which would be the single largest cost in a test suite that
+      creates a server per file.
+
+      Safe here only because terminateThreads() runs immediately afterwards
+      and the whole instance is then discarded. See the note on
+      mdb_runtime_set_shutdown_wait_seconds in the ABI header.
+    */
+    this.#module.ccall(
+      "mdb_runtime_set_shutdown_wait_seconds", null, ["number"], [0],
+    );
     return this.#call("mdb_runtime_shutdown", [], []);
   }
 

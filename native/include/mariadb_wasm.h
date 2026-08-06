@@ -85,6 +85,22 @@ int mdb_runtime_init_async(int argc, const char *const *argv);
 /* 0 = still running, 1 = finished successfully, negative = -mdb_status. */
 int mdb_runtime_init_poll(void);
 
+/*
+  How long mysql_server_end waits for MariaDB-registered threads to finish,
+  in seconds. MariaDB's default is 5.
+
+  Under wasm exactly one thread never calls my_thread_end, so the wait always
+  runs to completion and every shutdown costs a flat 5 seconds — ruinous for a
+  test suite that creates a server per file. Setting this to 0 skips the wait.
+
+  That is safe only because the caller then terminates every Emscripten worker
+  and discards the whole wasm instance, which is what the TypeScript layer
+  does. It is not safe in a process that intends to keep running: MariaDB
+  deliberately leaves its global mutexes undestroyed when the wait times out,
+  precisely to avoid a use-after-free by a thread that is still live.
+*/
+void mdb_runtime_set_shutdown_wait_seconds(uint32_t seconds);
+
 int mdb_runtime_shutdown(void);
 
 /* 1 once init has succeeded and shutdown has not run. */

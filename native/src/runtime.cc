@@ -1,6 +1,14 @@
 /* Runtime lifecycle: mysql_server_init/end, global error channel, leak counts. */
 #include "internal.h"
 
+/*
+  Declared in MariaDB's include/my_pthread.h, which cannot be included here:
+  it depends on my_global.h's C_MODE_START/END macros and does not stand
+  alone. The symbol is a plain global, so declaring it is enough and no
+  MariaDB patch is needed.
+*/
+extern "C" unsigned int my_thread_end_wait_time;
+
 #include <atomic>
 #include <cstring>
 #include <memory>
@@ -125,6 +133,12 @@ int mdb_runtime_init_async(int argc, const char *const *argv) {
 }
 
 int mdb_runtime_init_poll(void) { return mdb::init_poll(); }
+
+void mdb_runtime_set_shutdown_wait_seconds(uint32_t seconds) {
+  /* Declared in include/my_pthread.h as a plain global, so no MariaDB patch
+     is needed to reach it. */
+  my_thread_end_wait_time = seconds;
+}
 
 int mdb_runtime_shutdown(void) {
   MDB_GUARD_BEGIN
