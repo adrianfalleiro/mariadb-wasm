@@ -11,7 +11,7 @@
     "node": ">=22.6.0"
   },
   "scripts": {
-    "test": "node --test test/*.test.ts"
+    "test": "node --test 'test/*.test.ts'"
   },
   "license": "GPL-2.0-only",
   "private": true

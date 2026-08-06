@@ -13,7 +13,8 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 source "$ROOT/emsdk/emsdk_env.sh" >/dev/null 2>&1
 
 BUILD="$ROOT/build/wasm"
-OUT="$ROOT/dist"
+PROFILE="${1:-release}"
+OUT="${MARIADB_WASM_DIST:-$ROOT/dist}"
 LIB="$BUILD/libmysqld/libmariadbd.a"
 
 if [ ! -f "$LIB" ]; then
@@ -36,9 +37,13 @@ EXPORTS="$(bash "$ROOT/scripts/gen-exports.sh")"
 # .mjs + .wasm + worker.
 RUNTIME_METHODS='["ccall","cwrap","HEAPU8","HEAPU32","UTF8ToString","stringToUTF8","lengthBytesUTF8","FS","NODEFS","PThread"]'
 
-# Development profile. Deliberately not tuned for size yet: the brief's
-# performance work comes after the differential suite passes, and a stripped
-# build would make the first InnoDB failures much harder to read.
+# Two profiles. Release is the default because ASSERTIONS=2 logs every heap
+# resize from every pthread, and those workers do not inherit the Module's
+# printErr override — the lines land straight in a consumer's test output with
+# no way to silence them from JavaScript.
+#
+#   release  -O2, no assertions      what the package ships
+#   debug    -O1 -g, ASSERTIONS=2    readable stacks, thread and heap tracing
 #
 # EXIT_RUNTIME=0 because this is a library, not a program. There is no main(),
 # so with EXIT_RUNTIME=1 Emscripten tears the runtime down the moment control
@@ -54,11 +59,31 @@ RUNTIME_METHODS='["ccall","cwrap","HEAPU8","HEAPU32","UTF8ToString","stringToUTF
 #
 # Memory is set explicitly, not left to defaults. MariaDB's static data alone
 # is ~19.8 MB, over Emscripten's 16 MB default, so the link fails outright
-# without this. 128 MB initial is a starting point chosen to cover static data
-# plus a 16 MB InnoDB buffer pool without growing during startup - growth is
-# comparatively expensive with -pthread, since the heap is a SharedArrayBuffer
-# that every worker must re-acquire. Phase 15 measures and tunes it.
-em++ -g -O2 -std=c++17 \
+# without this.
+#
+# 160 MB covers static data plus a 16 MB buffer pool with room to spare. It
+# was briefly 512 MB while the startup deadlock was being chased, on the
+# theory that heap growth was racing thread startup; that turned out to be
+# wrong (the real cause was filesystem proxying - see docs/status.md), and
+# carrying 512 MB per instance would have cost 2 GB for the four-instance
+# isolation test. Verified at 15/15 runs after the real fix.
+case "$PROFILE" in
+  release)
+    PROFILE_FLAGS=(-O2 -sASSERTIONS=0)
+    ;;
+  debug)
+    # PTHREADS_DEBUG traces thread lifecycle; it is how the startup deadlock
+    # was tracked down, so it stays one flag away.
+    PROFILE_FLAGS=(-O1 -g -sASSERTIONS=2 -sPTHREADS_DEBUG=1 -sSTACK_OVERFLOW_CHECK=2)
+    ;;
+  *)
+    echo "unknown profile '$PROFILE' (expected release or debug)" >&2
+    exit 1
+    ;;
+esac
+
+em++ -std=c++17 \
+  "${PROFILE_FLAGS[@]}" \
   -pthread \
   -DEMBEDDED_LIBRARY -UMYSQL_CLIENT \
   -I "$ROOT/native/include" \
@@ -75,13 +100,12 @@ em++ -g -O2 -std=c++17 \
   -sMODULARIZE=1 \
   -sEXPORT_ES6=1 \
   -sALLOW_MEMORY_GROWTH=1 \
-  -sINITIAL_MEMORY=512MB \
+  -sINITIAL_MEMORY=160MB \
   -sMAXIMUM_MEMORY=2GB \
   -sPTHREAD_POOL_SIZE=16 \
   -sPTHREAD_POOL_SIZE_STRICT=2 \
   -sEXIT_RUNTIME=0 \
   -sFORCE_FILESYSTEM=1 \
-  -sASSERTIONS=2 \
   -sSTACK_SIZE=4MB \
   -sEXPORTED_FUNCTIONS="$EXPORTS" \
   -sEXPORTED_RUNTIME_METHODS="$RUNTIME_METHODS" \
@@ -96,6 +120,52 @@ rm -rf "$OUT/share" "$OUT/charsets"
 mkdir -p "$OUT/share/english"
 cp "$BUILD/sql/share/english/errmsg.sys" "$OUT/share/english/errmsg.sys"
 cp -R "$ROOT/mariadb/sql/share/charsets" "$OUT/charsets"
+
+# Manifest, so an artifact can always be traced back to what produced it.
+# Every input that changes the output is recorded; a cache keyed on this
+# cannot serve a stale build.
+python3 - "$OUT/build-manifest.json" <<MANIFEST
+import hashlib, json, pathlib, subprocess, sys
+
+root = pathlib.Path("$ROOT")
+out = pathlib.Path(sys.argv[1])
+
+def run(*args):
+    try:
+        return subprocess.run(args, capture_output=True, text=True,
+                              cwd=root).stdout.strip()
+    except Exception:
+        return "unknown"
+
+# The patch scripts are the portability work, so their content is part of the
+# build identity just as much as the MariaDB revision is.
+patch_hash = hashlib.sha256()
+for name in sorted(["02b-patch-mariadb.sh", "03-configure-wasm.sh",
+                    "05-link-wasm-module.sh"]):
+    patch_hash.update((root / "scripts" / name).read_bytes())
+
+artifacts = {}
+for artifact in ("mariadb.mjs", "mariadb.wasm"):
+    path = out.parent / artifact
+    if path.exists():
+        artifacts[artifact] = {
+            "bytes": path.stat().st_size,
+            "sha256": hashlib.sha256(path.read_bytes()).hexdigest(),
+        }
+
+out.write_text(json.dumps({
+    "mariadbRevision": run("git", "-C", str(root / "mariadb"), "rev-parse", "HEAD"),
+    "mariadbTag": run("git", "-C", str(root / "mariadb"), "describe", "--tags"),
+    "emscriptenVersion": (root / "emsdk/upstream/emscripten/emscripten-version.txt")
+        .read_text().strip().strip('"'),
+    "nodeVersion": run("node", "--version"),
+    "cmakeVersion": run("cmake", "--version").splitlines()[0] if run("cmake", "--version") else "unknown",
+    "buildType": "$PROFILE",
+    "scriptsSha256": patch_hash.hexdigest(),
+    "artifacts": artifacts,
+}, indent=2) + "\n")
+print(f"wrote {out}")
+MANIFEST
 
 echo "--- artifacts ---"
 ls -la "$OUT"
