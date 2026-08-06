@@ -6,18 +6,42 @@ Running log. Newest entries at the bottom of each section.
 
 | Phase | State | Exit condition |
 |---|---|---|
-| 0 — inspect and pin | done | Revision pinned, embedded target and its merge set identified — `docs/source-inventory.md` |
-| 1 — native `libmariadbd` | done | `libmariadbd.a` builds; native smoke test passes the InnoDB transaction scenario |
-| 2 — C ABI | done | Wrapper builds against native libmariadbd; `12-run-abi-smoke.sh` passes 39 assertions |
-| 3 — host generators | done | `import_executables.cmake` exports 6 host-native tools; target configure resolves them without running wasm |
-| 4 — Emscripten toolchain | done | CMake generates a Ninja graph for `mysqlserver` with `CMAKE_C_COMPILER=emcc` |
-| 5 — plugin surface | partial | Unrelated engines disabled at configure; `docs/plugin-matrix.md` not yet written |
-| 6 — compile-fix loop | done | `mysqlserver` builds for wasm32-emscripten, 0 of 829 targets failing |
+| 0 — inspect and pin | done | Revision pinned, embedded target and merge set identified — `docs/source-inventory.md` |
+| 1 — native `libmariadbd` | done | Builds; smoke test passes the InnoDB transaction scenario |
+| 2 — C ABI | done | 63 assertions pass natively through the wrapper |
+| 3 — host generators | done | 6 host-native tools imported; no wasm generator is executed |
+| 4 — Emscripten toolchain | done | Ninja graph generated with `CMAKE_C_COMPILER=emcc`, asserted by the script |
+| 5 — plugin surface | done | `docs/plugin-matrix.md`; no dynamic plugins produced |
+| 6 — compile-fix loop | done | 0 of 829 targets failing |
 | 7 — first linkable module | done | `dist/mariadb.mjs` + `mariadb.wasm`; Node instantiates and calls exports |
-| 8 — datadir bootstrap | partial | Empty MEMFS datadir suffices; no packaged template yet |
-| 9 — init under wasm | done | Initialises, runs `SELECT 1`, shuts down cleanly; 35/35 runs |
-| 10 — InnoDB under wasm | done | Full transaction scenario passes deterministically |
-| 11+ | not started | |
+| 8 — datadir bootstrap | partial | Empty MEMFS datadir suffices; **no packaged template**, so `mysql.*` system tables are absent |
+| 9 — init under wasm | done | Initialises, queries, shuts down cleanly; 25/25 consecutive runs |
+| 10 — InnoDB under wasm | done | Full transaction scenario, deterministic |
+| 11 — TypeScript API | done | The brief's worked example runs verbatim; 25 package tests |
+| 12 — worker ownership | done | Direct and inside `worker_threads`; both green, public API unchanged |
+| 13 — differential suite | done | 97 statements across 14 cases agree, with a negative control |
+| 14 — runner integration | done | Four concurrent servers isolated; helpers added |
+| 15 — performance | partial | Shutdown fixed (45×); plugin trimming not done — `docs/performance.md` |
+| 16 — CI | done | `.github/workflows/ci.yml` rebuilds from clean and runs all suites |
+
+## Remaining gaps
+
+Honest list of what an acceptance review would still find:
+
+- **No datadir template.** `mysql.*` system tables are absent, so grants,
+  stored routines, triggers, events and named time zones are unavailable.
+  This is the largest functional gap.
+- **Locking behaviour untested.** `SELECT ... FOR UPDATE`, lock-wait timeout,
+  deadlock detection and isolation levels are not exercised; the differential
+  runner is single-connection.
+- **One MariaDB thread never exits** at shutdown. Worked around by skipping
+  the wait; the thread has not been identified.
+- **Blocking ABI calls remain exposed** to the filesystem-proxying deadlock in
+  principle. Initialisation was the acute case and is fixed; queries have been
+  stable in every run, but the durable fix is to move all calls onto a
+  dedicated thread.
+- **~1 GB RSS** after a workload, uninvestigated.
+- **`dist/` ships no licence notices** — see `docs/licensing.md`.
 
 ## Verified behaviour (wasm)
 
