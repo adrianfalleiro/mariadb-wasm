@@ -12,3 +12,9 @@ export type {
   StorageMode,
 } from "./types.ts";
 export { FieldFlag, FieldType } from "./types.ts";
+export {
+  createDatabasePerTest,
+  createSchemaPerTest,
+  resetServerPerFile,
+  withTransactionRollback,
+} from "./testing.ts";
