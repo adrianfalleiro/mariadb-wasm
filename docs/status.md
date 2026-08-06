@@ -52,7 +52,11 @@ Honest list of what an acceptance review would still find:
   ~85 MB of 1.2 GB. Per-instance cost is down 53% (see `docs/performance.md`),
   but a long-lived runner creating and destroying many servers will still
   accumulate.
-- **`dist/` ships no licence notices** — see `docs/licensing.md`.
+- ~~`dist/` ships no licence notices.~~ **Closed.** `dist/licenses/` now
+  carries the GPLv2, LGPL 2.1, wolfSSL and zlib texts plus MariaDB's
+  THIRDPARTY, with a README naming each component. The *review* in
+  `docs/licensing.md` is still outstanding — the notices are the mechanical
+  part of the obligation, not the legal one.
 - **CI has never been executed.** The workflow is written against Ubuntu but
   the build scripts carry macOS assumptions (`clang++`, `-liconv`, `xcrun`).
   Every result quoted in this repository comes from a macOS arm64 host.

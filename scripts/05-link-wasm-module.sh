@@ -136,6 +136,45 @@ mkdir -p "$OUT/share/english"
 cp "$BUILD/sql/share/english/errmsg.sys" "$OUT/share/english/errmsg.sys"
 cp -R "$ROOT/mariadb/sql/share/charsets" "$OUT/charsets"
 
+# Licence notices. The artifact is statically linked from GPLv2 MariaDB Server
+# plus several bundled libraries under their own terms, so the texts travel
+# with it. See docs/licensing.md - this satisfies the mechanical part of the
+# obligation, not the review.
+LICENSES="$OUT/licenses"
+rm -rf "$LICENSES"
+mkdir -p "$LICENSES"
+cp "$ROOT/mariadb/COPYING"             "$LICENSES/MariaDB-COPYING-GPLv2.txt"
+cp "$ROOT/mariadb/THIRDPARTY"          "$LICENSES/MariaDB-THIRDPARTY.txt"
+cp "$ROOT/mariadb/libmariadb/COPYING.LIB" "$LICENSES/MariaDB-Connector-C-LGPL-2.1.txt"
+cp "$ROOT/mariadb/zlib/LICENSE"        "$LICENSES/zlib-LICENSE.txt"
+cp "$ROOT/mariadb/extra/wolfssl/wolfssl/COPYING" "$LICENSES/wolfSSL-COPYING-GPLv2.txt"
+
+cat > "$LICENSES/README.md" <<'NOTICE'
+# Licence notices
+
+`mariadb.wasm` is statically linked from MariaDB Server and several libraries
+bundled with it. Their licence texts are in this directory.
+
+| Component | Licence | File |
+|---|---|---|
+| MariaDB Server (the embedded server, InnoDB, Aria, MyISAM) | GPLv2 | `MariaDB-COPYING-GPLv2.txt` |
+| MariaDB Connector/C | LGPL 2.1 | `MariaDB-Connector-C-LGPL-2.1.txt` |
+| wolfSSL | GPLv2 in this configuration | `wolfSSL-COPYING-GPLv2.txt` |
+| zlib | zlib licence | `zlib-LICENSE.txt` |
+| PCRE2 | BSD | see `MariaDB-THIRDPARTY.txt` |
+| Third-party code inside MariaDB | various | `MariaDB-THIRDPARTY.txt` |
+
+The wrapper in `native/`, the package in `package/`, and the build scripts are
+original work in this repository.
+
+Because the artifact contains GPLv2 code, distributing it carries source
+obligations. MariaDB is fetched from upstream at a pinned tag and every
+modification is a reviewable patch in `scripts/02b-patch-mariadb.sh`, so the
+corresponding source is reconstructible from this repository — but how the
+obligation is discharged for a statically linked WebAssembly artifact has not
+been reviewed. See `docs/licensing.md`. Do not publish without doing that.
+NOTICE
+
 # Manifest, so an artifact can always be traced back to what produced it.
 # Every input that changes the output is recorded; a cache keyed on this
 # cannot serve a stale build.

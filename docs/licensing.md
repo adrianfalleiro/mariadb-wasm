@@ -26,14 +26,14 @@ original work.
 | Is the source available? | Yes. MariaDB is fetched from upstream at a pinned tag, and every modification is a reviewable patch in `scripts/02b-patch-mariadb.sh` rather than an edit buried in a vendored tree |
 | Are the modifications documented? | Yes — `docs/portability-matrix.md`, and each patch carries its rationale inline |
 | Licence metadata | `package/package.json` declares `"license": "GPL-2.0-only"` |
-| Licence notices shipped with the artifact | **Not yet.** `dist/` contains no `LICENSE` or notices file. This is an open item |
+| Licence notices shipped with the artifact | Yes. `dist/licenses/` carries GPLv2, LGPL 2.1, wolfSSL, zlib and MariaDB's THIRDPARTY, with a README naming each component |
 | Reviewed by counsel or under an organisation licensing policy | **No** |
 
 ## Before anything is published
 
 1. Remove `"private": true` only as a deliberate act, never as a side effect.
-2. Ship the MariaDB `COPYING` file and the third-party notices alongside
-   `dist/`.
+2. ~~Ship the MariaDB `COPYING` file and the third-party notices alongside
+   `dist/`.~~ Done — `dist/licenses/`.
 3. Confirm how the GPLv2 obligations apply to a statically linked WebAssembly
    artifact distributed via npm, and how the corresponding source is offered.
 4. Get that confirmation from qualified counsel or the organisation's

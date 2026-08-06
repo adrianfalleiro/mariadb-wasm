@@ -51,6 +51,38 @@ native reference build; the wasm build inherits their defaults and links
 `wsrep_dummy.cc` regardless, which is the no-op implementation. Aligning the
 two is tidy-up, not a correctness issue.
 
-Removing perfschema, wolfSSL, feedback and auth_socket is the obvious artifact-
-size work, and belongs in Phase 15 — after the differential suite passes, which
-it now does, but measured rather than guessed.
+## Trimming: attempted, measured, reverted
+
+Removing the inert plugins looked like the obvious artifact-size win. It was
+tried and backed out.
+
+Only two are big enough to matter: `perfschema` (1.3 MB of archive) and
+`wolfSSL` (1.5 MB), against a 12.1 MB artifact — and the linker only pulls in
+referenced objects, so the real saving is smaller still. `feedback`,
+`auth_socket` and `userstat` are each under 0.05 MB.
+
+wolfSSL cannot go: `mysys_ssl` uses it for SHA1 and AES, which the server needs
+regardless of TLS.
+
+`PLUGIN_PERFSCHEMA=NO` builds, and then every startup fails with:
+
+```
+unknown variable 'performance-schema=OFF'
+```
+
+The option ceases to exist when the plugin is not compiled in, and
+`--performance-schema=OFF` is passed by the package defaults, both smoke tests,
+the differential runner and the datadir bootstrap tool. Removing it from all of
+them would also mean a user passing it through `serverOptions` gets a startup
+failure instead of a no-op. That is a poor trade for about a megabyte, so
+perfschema stays compiled in and disabled at runtime.
+
+Worth recording rather than leaving as a standing TODO, so nobody re-derives
+it: the reason to keep perfschema is not inertia.
+
+One real bug came out of the attempt. `scripts/10-build-native-reference.sh`
+and `02-build-host-tools.sh` reconfigured an existing build directory, and
+CMake caches every `-D` — so *removing* a flag from the script did not unset
+it, and the reverted change survived a rebuild. Both scripts now delete
+`CMakeCache.txt` before configuring, which forces a full reconfigure while
+letting ninja reuse object files.

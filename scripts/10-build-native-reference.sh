@@ -15,6 +15,15 @@ BUILD="$ROOT/build/native"
 mkdir -p "$BUILD"
 cd "$BUILD"
 
+# Delete the cache, keep the objects. CMake caches every -D, and *removing* a
+# -D from this script does not unset it — a plugin turned off in one run stays
+# off in the next, silently, which is how a "reverted" change survived a
+# rebuild and broke startup with "unknown variable 'performance-schema=OFF'".
+# Dropping just CMakeCache.txt forces a full reconfigure while letting ninja
+# reuse unchanged object files, so this costs seconds rather than the ~15
+# minutes a clean build would.
+rm -f "$BUILD/CMakeCache.txt"
+
 # See 02-build-host-tools.sh for why bundled zlib is load-bearing on macOS.
 cmake "$ROOT/mariadb" \
   -G Ninja \
