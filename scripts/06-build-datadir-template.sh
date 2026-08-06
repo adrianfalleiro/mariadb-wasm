@@ -11,6 +11,7 @@
 # embedded server, i.e. the exact code that will later read the datadir.
 set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+source "$ROOT/scripts/lib/platform.sh"
 
 BUILD="$ROOT/build/native"
 LIB="$BUILD/libmysqld/libmariadbd.a"
@@ -39,7 +40,7 @@ if [ ! -f "$LIB" ]; then
   exit 1
 fi
 
-clang++ -g -O1 -std=c++17 \
+"$HOST_CXX" -g -O1 -std=c++17 \
   -DEMBEDDED_LIBRARY -UMYSQL_CLIENT \
   -I "$ROOT/native/include" -I "$ROOT/native/src" \
   -I "$ROOT/mariadb/include" -I "$BUILD/include" \
@@ -49,7 +50,7 @@ clang++ -g -O1 -std=c++17 \
   "$ROOT/native/src/statement.cc" \
   "$ROOT/tools/bootstrap-datadir.c" \
   "$LIB" "$BUILD/tpool/libtpool.a" \
-  -lresolv -liconv \
+  "${HOST_LINK_LIBS[@]}" \
   -o "$TOOL"
 
 STATEMENTS="$BUILD/bootstrap-statements.txt"

@@ -7,8 +7,9 @@
 # differential suite compares like with like.
 set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+source "$ROOT/scripts/lib/platform.sh"
+require_bison_3
 
-export PATH="/opt/homebrew/opt/bison/bin:$PATH"
 
 BUILD="$ROOT/build/native"
 mkdir -p "$BUILD"
@@ -18,7 +19,7 @@ cd "$BUILD"
 cmake "$ROOT/mariadb" \
   -G Ninja \
   -DCMAKE_BUILD_TYPE=RelWithDebInfo \
-  -DCMAKE_OSX_SYSROOT="$(xcrun --show-sdk-path)" \
+  "${HOST_CMAKE_ARGS[@]}" \
   -DWITH_EMBEDDED_SERVER=ON \
   -DWITH_UNIT_TESTS=OFF \
   -DCONC_WITH_UNITTEST=OFF \

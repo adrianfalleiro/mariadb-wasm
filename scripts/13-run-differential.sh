@@ -6,6 +6,7 @@
 # a failure is never a stale-artifact artefact.
 set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+source "$ROOT/scripts/lib/platform.sh"
 
 BUILD="$ROOT/build/native"
 LIB="$BUILD/libmysqld/libmariadbd.a"
@@ -22,7 +23,7 @@ fi
 
 # Same wrapper sources as the wasm module links, so the two sides differ only
 # in the target, never in the code under test.
-clang++ -g -O1 -std=c++17 \
+"$HOST_CXX" -g -O1 -std=c++17 \
   -DEMBEDDED_LIBRARY -UMYSQL_CLIENT \
   -I "$ROOT/native/include" \
   -I "$ROOT/native/src" \
@@ -35,7 +36,7 @@ clang++ -g -O1 -std=c++17 \
   "$ROOT/tests/differential/runner.c" \
   "$LIB" \
   "$BUILD/tpool/libtpool.a" \
-  -lresolv -liconv \
+  "${HOST_LINK_LIBS[@]}" \
   -o "$RUNNER"
 
 echo "--- built $RUNNER ---"

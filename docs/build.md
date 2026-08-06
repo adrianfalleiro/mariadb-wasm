@@ -7,12 +7,27 @@ diagnosable.
 
 ## Prerequisites
 
+macOS:
+
 ```bash
 brew install bison ninja cmake
 ```
 
-Bison must be 3.x. macOS ships 2.3, which cannot build the SQL parser; the
-scripts prepend `/opt/homebrew/opt/bison/bin` to `PATH` themselves.
+Debian/Ubuntu:
+
+```bash
+sudo apt-get install bison ninja-build cmake libncurses-dev
+```
+
+Bison must be 3.x — macOS ships 2.3, which cannot build the SQL parser. The
+scripts check the version up front and add Homebrew's bison to `PATH`
+themselves.
+
+Host differences live in `scripts/lib/platform.sh`: which compiler to use
+(`c++`, i.e. clang++ on macOS and g++ on Linux), which libraries to link
+(`-liconv` exists only on macOS; `-ldl` only matters on Linux), and whether an
+SDK path has to be pinned. Override any of them from the environment rather
+than editing the scripts.
 
 ## One-time fetch
 
@@ -30,8 +45,13 @@ it after any change to the pinned revision.
 ```bash
 bash scripts/10-build-native-reference.sh   # libmariadbd.a  (~15 min)
 bash scripts/11-run-native-smoke.sh         # 22 assertions, direct libmariadbd
-bash scripts/12-run-abi-smoke.sh            # 39 assertions, through the C ABI
+bash scripts/12-run-abi-smoke.sh            # 63 assertions, through the C ABI
+bash scripts/06-build-datadir-template.sh  # mysql.* system tables -> dist/
 ```
+
+`06` needs the native build: the template is produced by running MariaDB's own
+bootstrap SQL through the embedded server. Without it the package still works,
+falling back to an empty datadir with no `mysql.*` tables.
 
 Both smoke tests create and destroy their own datadir under `build/native/`.
 

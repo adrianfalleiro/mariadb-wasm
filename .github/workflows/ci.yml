@@ -30,6 +30,10 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
             bison ninja-build cmake libncurses-dev
+          # Sanity-check the two host assumptions the scripts make. c++ is g++
+          # here and clang++ on macOS; bison must be 3.x for the SQL parser.
+          c++ --version | head -1
+          bison --version | head -1
 
       - uses: actions/setup-node@v4
         with:
@@ -92,6 +96,19 @@ jobs:
       - name: Native C ABI smoke test
         run: bash scripts/12-run-abi-smoke.sh
 
+      - name: Build the datadir template
+        run: bash scripts/06-build-datadir-template.sh
+
+      # The template exists to keep instances cheap. If a change ever puts the
+      # InnoDB tablespaces back it jumps from under a megabyte to over forty,
+      # copied into every instance's filesystem, and that should fail loudly
+      # rather than show up later as memory pressure.
+      - name: Check the template stayed small
+        run: |
+          bytes=$(python3 -c "import json;print(json.load(open('dist/datadir-template.manifest.json'))['totalBytes'])")
+          echo "template is $bytes bytes"
+          test "$bytes" -lt 5000000 || { echo "template exceeded 5 MB"; exit 1; }
+
       - name: Configure wasm
         run: bash scripts/03-configure-wasm.sh
 
@@ -138,6 +155,9 @@ jobs:
       - name: Package test suite
         run: cd package && node --test 'test/*.test.ts'
 
+      - name: Benchmarks
+        run: node tests/wasm/bench.mjs
+
       - name: Show the build manifest
         run: cat dist/build-manifest.json
 
@@ -150,3 +170,5 @@ jobs:
             dist/build-manifest.json
             dist/share/**
             dist/charsets/**
+            dist/datadir-template/**
+            dist/datadir-template.manifest.json

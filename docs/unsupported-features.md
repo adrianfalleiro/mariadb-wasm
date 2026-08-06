@@ -27,9 +27,10 @@ because "we chose not to" and "it cannot" are not the same claim.
 
 | Feature | What is missing |
 |---|---|
-| A packaged datadir template | The datadir starts empty and InnoDB bootstraps its own tablespace. The `mysql.*` system tables are **absent** |
-| Grants, stored routines, triggers, events, named time zones | All need `mysql.*` system tables. `CONVERT_TZ` with named zones will not work; offsets do |
-| Persistent index statistics | `mysql.innodb_table_stats` is absent — this is the warning at startup. The optimizer falls back to sampled estimates |
+| Named time zones | `mysql.time_zone*` ship empty. Populating them needs `mysql_tzinfo_to_sql` and the host OS zoneinfo. Numeric offsets work; a named zone makes `CONVERT_TZ` return NULL, which is MariaDB's behaviour for an unknown zone |
+| Enforced privileges | The privilege tables are present, but `--skip-grant-tables` means `GRANT`/`REVOKE` are stored and never enforced |
+| `mysql.help_*` content | The help tables exist but are empty; `fill_help_tables.sql` is ~1 MB of text nothing in a test suite reads |
+| The `sys` schema | Not installed |
 | `storage: { type: "node" }` beyond the basics | Wired up and mountable, but restart-and-reopen is untested |
 | Differential coverage of locking | The behaviour itself works and is tested (`package/test/concurrency.test.ts`), but against InnoDB's documented contract rather than against the native build — the differential runner is single-connection |
 | `SELECT ... FOR UPDATE` under `storage: node` | Only exercised on MEMFS |
@@ -43,8 +44,12 @@ because "we chose not to" and "it cannot" are not the same claim.
 
 Benign, and expected until a datadir template exists:
 
+The privilege-table warning is gone now that the template ships the system
+tables. This one remains by design: the template deliberately ships no InnoDB
+tablespaces (they were 42 MB for four small tables), so those four tables are
+recreated just *after* startup, and InnoDB looks for them during it.
+
 ```
-Can't open and lock privilege tables: Table 'mysql.servers' doesn't exist
 InnoDB: Table mysql.innodb_table_stats not found.
 feedback plugin: failed to retrieve the MAC address
 warning: unsupported syscall: __syscall_prlimit64

@@ -14,7 +14,7 @@ Running log. Newest entries at the bottom of each section.
 | 5 — plugin surface | done | `docs/plugin-matrix.md`; no dynamic plugins produced |
 | 6 — compile-fix loop | done | 0 of 829 targets failing |
 | 7 — first linkable module | done | `dist/mariadb.mjs` + `mariadb.wasm`; Node instantiates and calls exports |
-| 8 — datadir bootstrap | partial | Empty MEMFS datadir suffices; **no packaged template**, so `mysql.*` system tables are absent |
+| 8 — datadir bootstrap | done | 620 KB reproducible template with the `mysql.*` system tables, cloned into MEMFS per instance — `scripts/06-build-datadir-template.sh` |
 | 9 — init under wasm | done | Initialises, queries, shuts down cleanly; 25/25 consecutive runs |
 | 10 — InnoDB under wasm | done | Full transaction scenario, deterministic |
 | 11 — TypeScript API | done | The brief's worked example runs verbatim; 25 package tests |
@@ -22,15 +22,19 @@ Running log. Newest entries at the bottom of each section.
 | 13 — differential suite | done | 97 statements across 14 cases agree, with a negative control |
 | 14 — runner integration | done | Four concurrent servers isolated; helpers added |
 | 15 — performance | partial | Shutdown fixed (45×); plugin trimming not done — `docs/performance.md` |
-| 16 — CI | **written, unverified** | `.github/workflows/ci.yml` exists but has never run. It would fail today: the smoke scripts invoke `clang++` (not installed by the workflow) and link `-liconv` (glibc has iconv built in, so there is no such library), and `xcrun` is macOS-only |
+| 16 — CI | **portable, still unverified** | The macOS assumptions are gone — `scripts/lib/platform.sh` selects compiler, link libraries and SDK flags per host, and both branches are exercised. The workflow has still never executed |
 
 ## Remaining gaps
 
 Honest list of what an acceptance review would still find:
 
-- **No datadir template.** `mysql.*` system tables are absent, so grants,
-  stored routines, triggers, events and named time zones are unavailable.
-  This is the largest functional gap.
+- **Named time zones.** `mysql.time_zone*` exist but are empty; loading
+  zoneinfo needs `mysql_tzinfo_to_sql` and the host OS database. Numeric
+  offsets work. `CONVERT_TZ` with a named zone returns NULL, which is
+  MariaDB's own behaviour for an unknown zone.
+- **Grants are inert.** The privilege tables exist, but the server runs with
+  `--skip-grant-tables`, so `GRANT`/`REVOKE` parse and store without being
+  enforced.
 - **Locking is verified, but only against InnoDB's documented contract, not
   differentially.** `SELECT ... FOR UPDATE`, lock waits that resolve, 1205
   timeouts, 1213/40001 deadlock detection with a single victim, REPEATABLE

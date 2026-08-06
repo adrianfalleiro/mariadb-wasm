@@ -7,6 +7,7 @@
 # those two distinguishable is the reason this test exists separately.
 set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+source "$ROOT/scripts/lib/platform.sh"
 
 BUILD="$ROOT/build/native"
 LIB="$BUILD/libmysqld/libmariadbd.a"
@@ -20,7 +21,7 @@ fi
 
 # libtpool.a is separate: see docs/source-inventory.md on why MERGE_LIBRARIES
 # does not fold it into libmariadbd.a.
-clang++ -g -O1 -std=c++17 \
+"$HOST_CXX" -g -O1 -std=c++17 \
   -DEMBEDDED_LIBRARY -UMYSQL_CLIENT \
   -I "$ROOT/native/include" \
   -I "$ROOT/native/src" \
@@ -33,7 +34,7 @@ clang++ -g -O1 -std=c++17 \
   "$ROOT/tests/native/abi_smoke.c" \
   "$LIB" \
   "$BUILD/tpool/libtpool.a" \
-  -lresolv -liconv \
+  "${HOST_LINK_LIBS[@]}" \
   -o "$BIN"
 
 echo "--- built $BIN ---"

@@ -7,8 +7,8 @@
 # fast once the shape is known.
 set -uo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+source "$ROOT/scripts/lib/platform.sh"
 
-export PATH="/opt/homebrew/opt/bison/bin:$PATH"
 source "$ROOT/emsdk/emsdk_env.sh" >/dev/null 2>&1
 
 TARGET="${1:-mysqlserver}"

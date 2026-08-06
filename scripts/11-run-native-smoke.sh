@@ -7,6 +7,7 @@
 # exactly the set the wasm link will have to account for.
 set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+source "$ROOT/scripts/lib/platform.sh"
 
 BUILD="$ROOT/build/native"
 # libmariadbd.a is NOT self-contained: libmysqld/CMakeLists.txt attaches tpool
@@ -25,14 +26,14 @@ fi
 
 # -DEMBEDDED_LIBRARY is what makes <mysql.h> expose the embedded connect path
 # and mysql_server_init/end, matching libmysqld/examples/CMakeLists.txt.
-clang++ -g -O1 -std=c++17 \
+"$HOST_CXX" -g -O1 -std=c++17 \
   -DEMBEDDED_LIBRARY -UMYSQL_CLIENT \
   -I "$ROOT/mariadb/include" \
   -I "$BUILD/include" \
   "$ROOT/tests/native/smoke.c" \
   "$LIB" \
   "$BUILD/tpool/libtpool.a" \
-  -lresolv -liconv \
+  "${HOST_LINK_LIBS[@]}" \
   -o "$BIN"
 
 echo "--- built $BIN ---"

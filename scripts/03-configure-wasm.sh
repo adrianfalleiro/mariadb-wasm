@@ -8,8 +8,9 @@
 # worker_threads + SharedArrayBuffer on Node.
 set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+source "$ROOT/scripts/lib/platform.sh"
+require_bison_3
 
-export PATH="/opt/homebrew/opt/bison/bin:$PATH"
 source "$ROOT/emsdk/emsdk_env.sh" >/dev/null 2>&1
 
 HOST_TOOLS="$ROOT/build/host/import_executables.cmake"

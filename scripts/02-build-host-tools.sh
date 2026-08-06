@@ -5,8 +5,9 @@
 # the host. Produces build/host/import_executables.cmake.
 set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+source "$ROOT/scripts/lib/platform.sh"
+require_bison_3
 
-export PATH="/opt/homebrew/opt/bison/bin:$PATH"
 
 BUILD="$ROOT/build/host"
 mkdir -p "$BUILD"
@@ -20,7 +21,7 @@ cd "$BUILD"
 cmake "$ROOT/mariadb" \
   -G Ninja \
   -DCMAKE_BUILD_TYPE=Release \
-  -DCMAKE_OSX_SYSROOT="$(xcrun --show-sdk-path)" \
+  "${HOST_CMAKE_ARGS[@]}" \
   -DWITH_UNIT_TESTS=OFF \
   -DWITH_ZLIB=bundled \
   -DWITH_SSL=bundled
