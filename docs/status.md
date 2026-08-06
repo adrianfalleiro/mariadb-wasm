@@ -15,14 +15,14 @@ Running log. Newest entries at the bottom of each section.
 | 6 — compile-fix loop | done | `mysqlserver` builds for wasm32-emscripten, 0 of 829 targets failing |
 | 7 — first linkable module | done | `dist/mariadb.mjs` + `mariadb.wasm`; Node instantiates and calls exports |
 | 8 — datadir bootstrap | partial | Empty MEMFS datadir suffices; no packaged template yet |
-| 9 — init under wasm | **blocked** | `SELECT 1` passes, but startup deadlocks ~50% of runs |
-| 10 — InnoDB under wasm | done, gated on 9 | Full transaction scenario passes when startup wins the race |
+| 9 — init under wasm | done | Initialises, runs `SELECT 1`, shuts down cleanly; 35/35 runs |
+| 10 — InnoDB under wasm | done | Full transaction scenario passes deterministically |
 | 11+ | not started | |
 
 ## Verified behaviour (wasm)
 
-`node tests/wasm/smoke.mjs` — 22 assertions, all passing **on runs where
-startup succeeds**, in ~0.5s wall clock:
+`node tests/wasm/smoke.mjs` — 22 assertions, all passing, in ~0.5s wall
+clock, 25/25 consecutive runs (plus 10/10 inside a `worker_threads` worker):
 
 `SELECT 1`, `CREATE DATABASE`, `CREATE TABLE ... ENGINE=InnoDB` (engine
 confirmed via `information_schema`), `INSERT`, exact `DECIMAL(20,4)`,
@@ -33,7 +33,7 @@ confirmed via `information_schema`), `INSERT`, exact `DECIMAL(20,4)`,
 pthread worker holding the event loop open (criterion 3.2.9).
 
 So the milestone in §29 of the brief is reached: *real MariaDB embedded server
-with InnoDB executing inside WebAssembly*. It is not yet dependable.
+with InnoDB executing inside WebAssembly*.
 
 ## Verified behaviour (native reference)
 
@@ -114,7 +114,7 @@ Test:        The three assertions at the end of scripts/03-configure-wasm.sh
 Commit:      (wasm configure hardening commit)
 ```
 
-### 2026-08-05 — OPEN: bistable startup deadlock in mysql_server_init
+### 2026-08-05 — RESOLVED: bistable startup deadlock in mysql_server_init
 
 ```
 Date:        2026-08-05
@@ -160,7 +160,44 @@ growth under `-pthread` is something em++ explicitly warns about.
 
 `spike/pthread-probe.c` already showed the *steady-state* InnoDB threading
 shape works under Emscripten — four workers parked on `pthread_cond_timedwait`,
-woken, joined. So the problem is specific to startup, not to threading itself.
+woken, joined. So the problem was specific to startup, not to threading itself.
+
+**Root cause.** Emscripten keeps the filesystem in the *main thread's*
+JavaScript heap. MEMFS nodes are ordinary JS objects, and a worker's JS heap is
+separate, so a threaded build proxies syscalls to the main thread when a
+pthread makes them — 54 of them in this build, `openat`, `write`, `fstat` and
+the rest. InnoDB creates and writes its system tablespace and redo logs from
+background threads during `srv_start`. Calling `mysql_server_init` on the main
+thread therefore blocks the one thread that has to service those proxied calls,
+against the very threads it is waiting for.
+
+It was bistable rather than always-hung because Emscripten's main thread does
+pump the proxy queue while parked in some futex waits, so whether it deadlocked
+depended on which wait it happened to be in when InnoDB's first background I/O
+arrived. That also explains why pool size, worker topology, memory growth and
+InnoDB thread count all failed to move the needle: none of them changes the
+fact that the main thread is blocked.
+
+**Fix**, in two parts:
+
+1. `mdb_runtime_init_async` + `mdb_runtime_init_poll` run initialisation on a
+   dedicated pthread. JavaScript polls from its event loop, so the main thread
+   stays free to service proxied filesystem calls. `mdb_runtime_init` is kept
+   for native callers, which have no such constraint.
+2. `-sEXIT_RUNTIME=0`. With no `main()`, `EXIT_RUNTIME=1` tears the runtime
+   down as soon as control returns to the event loop, so the first poll aborted
+   with "native function called after runtime exit". Yielding to the event loop
+   is the entire point of the fix, so the runtime has to survive it.
+
+Result: 25/25 consecutive runs direct, 10/10 inside a `worker_threads` worker,
+against 4/10 before. Node still exits on its own, so the fix did not come at
+the cost of criterion 3.2.9.
+
+**Consequence for later phases.** Any ABI call that blocks while InnoDB
+background threads do I/O has the same exposure. Initialisation is the worst
+case by far, and queries have been stable in every run so far, but the durable
+answer is the Phase 12 topology: run every MariaDB call on a dedicated thread
+and never block the thread that owns the filesystem.
 
 ---
 

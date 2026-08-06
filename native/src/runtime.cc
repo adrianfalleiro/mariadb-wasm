@@ -3,7 +3,9 @@
 
 #include <atomic>
 #include <cstring>
+#include <memory>
 #include <mutex>
+#include <pthread.h>
 
 namespace mdb {
 
@@ -91,43 +93,31 @@ int mdb_runtime_init(int argc, const char *const *argv) {
     return MDB_ERR_BAD_STATE;
   }
 
-  /* mysql_server_init takes a conventional argv whose first entry is the
-     program name and is ignored as an option. Building that here keeps the
-     detail out of the JavaScript layer. */
-  std::vector<std::string> owned;
-  owned.reserve(static_cast<size_t>(argc < 0 ? 0 : argc) + 1);
-  owned.emplace_back("mariadb_wasm");
-  for (int i = 0; i < argc; i++)
-    owned.emplace_back(argv && argv[i] ? argv[i] : "");
-
-  std::vector<char *> server_args;
-  server_args.reserve(owned.size());
-  for (std::string &arg : owned)
-    server_args.push_back(const_cast<char *>(arg.c_str()));
-
-  /* The option groups mysqld itself reads. With --no-defaults nothing is
-     loaded, but passing them keeps option parsing identical to the native
-     reference, which is the whole point of having a reference. */
-  static char group_embedded[] = "embedded";
-  static char group_server[] = "server";
-  char *server_groups[] = {group_embedded, group_server, nullptr};
-
-  if (mysql_server_init(static_cast<int>(server_args.size()),
-                        server_args.data(), server_groups) != 0) {
-    mdb::set_global_error(0, "HY000", "mysql_server_init failed");
-    return MDB_ERR_MYSQL;
-  }
-
-  /* Force the handle tables into existence before any connection can race on
-     first use. */
-  mdb::connections();
-  mdb::results();
-
-  mdb::set_runtime_ready(true);
-  return MDB_OK;
+  return mdb::run_server_init(mdb::copy_server_args(argc, argv));
 
   MDB_GUARD_END(MDB_ERR_INTERNAL)
 }
+
+int mdb_runtime_init_async(int argc, const char *const *argv) {
+  MDB_GUARD_BEGIN
+
+  if (mdb::runtime_ready()) {
+    mdb::set_global_error(0, "HY000", "runtime already initialised");
+    return MDB_ERR_BAD_STATE;
+  }
+  if (mdb::init_state() == 1) {
+    mdb::set_global_error(0, "HY000", "initialisation already in progress");
+    return MDB_ERR_BAD_STATE;
+  }
+
+  /* The argv strings are copied here, on the caller's thread, because the
+     caller frees them as soon as this returns. */
+  return mdb::start_async_init(mdb::copy_server_args(argc, argv));
+
+  MDB_GUARD_END(MDB_ERR_INTERNAL)
+}
+
+int mdb_runtime_init_poll(void) { return mdb::init_poll(); }
 
 int mdb_runtime_shutdown(void) {
   MDB_GUARD_BEGIN
@@ -172,6 +162,115 @@ namespace mdb {
 
 void set_runtime_ready(bool ready) {
   g_ready.store(ready, std::memory_order_release);
+}
+
+std::vector<std::string> copy_server_args(int argc, const char *const *argv) {
+  /* mysql_server_init takes a conventional argv whose first entry is the
+     program name and is ignored as an option. Building that here keeps the
+     detail out of the JavaScript layer. */
+  std::vector<std::string> owned;
+  owned.reserve(static_cast<size_t>(argc < 0 ? 0 : argc) + 1);
+  owned.emplace_back("mariadb_wasm");
+  for (int i = 0; i < argc; i++)
+    owned.emplace_back(argv && argv[i] ? argv[i] : "");
+  return owned;
+}
+
+int run_server_init(std::vector<std::string> owned) {
+  std::vector<char *> server_args;
+  server_args.reserve(owned.size());
+  for (std::string &arg : owned)
+    server_args.push_back(const_cast<char *>(arg.c_str()));
+
+  /* The option groups mysqld itself reads. With --no-defaults nothing is
+     loaded, but passing them keeps option parsing identical to the native
+     reference, which is the whole point of having a reference. */
+  static char group_embedded[] = "embedded";
+  static char group_server[] = "server";
+  char *server_groups[] = {group_embedded, group_server, nullptr};
+
+  if (mysql_server_init(static_cast<int>(server_args.size()),
+                        server_args.data(), server_groups) != 0) {
+    set_global_error(0, "HY000", "mysql_server_init failed");
+    return MDB_ERR_MYSQL;
+  }
+
+  /* Force the handle tables into existence before any connection can race on
+     first use. */
+  connections();
+  results();
+
+  set_runtime_ready(true);
+  return MDB_OK;
+}
+
+namespace {
+
+/* 0 = idle/not started, 1 = running, 2 = finished (result in g_init_result). */
+std::atomic<int> g_init_state{0};
+std::atomic<int> g_init_result{MDB_OK};
+
+/* Owned by the init thread for its lifetime; freed there. */
+struct AsyncInitArgs {
+  std::vector<std::string> args;
+};
+
+void *async_init_entry(void *raw) {
+  std::unique_ptr<AsyncInitArgs> owned(static_cast<AsyncInitArgs *>(raw));
+
+  int result;
+  try {
+    result = run_server_init(std::move(owned->args));
+  } catch (const std::exception &e) {
+    set_global_error(0, "HY000", e.what());
+    result = MDB_ERR_INTERNAL;
+  } catch (...) {
+    set_global_error(0, "HY000", "unknown exception during initialisation");
+    result = MDB_ERR_INTERNAL;
+  }
+
+  g_init_result.store(result, std::memory_order_relaxed);
+  /* Release so a poller that observes state 2 also sees the result. */
+  g_init_state.store(2, std::memory_order_release);
+  return nullptr;
+}
+
+}  // namespace
+
+int init_state() { return g_init_state.load(std::memory_order_acquire); }
+
+int start_async_init(std::vector<std::string> args) {
+  auto payload = std::unique_ptr<AsyncInitArgs>(new AsyncInitArgs{std::move(args)});
+
+  g_init_result.store(MDB_OK, std::memory_order_relaxed);
+  g_init_state.store(1, std::memory_order_release);
+
+  pthread_t thread;
+  if (pthread_create(&thread, nullptr, async_init_entry, payload.get()) != 0) {
+    g_init_state.store(0, std::memory_order_release);
+    set_global_error(0, "HY000", "could not create the initialisation thread");
+    return MDB_ERR_INTERNAL;
+  }
+
+  /* The thread owns the payload from here. */
+  payload.release();
+
+  /* Detached: nothing joins it, and the caller polls for completion instead. */
+  pthread_detach(thread);
+  return MDB_OK;
+}
+
+int init_poll() {
+  switch (g_init_state.load(std::memory_order_acquire)) {
+    case 1:
+      return 0;  /* still running */
+    case 2: {
+      int result = g_init_result.load(std::memory_order_relaxed);
+      return result == MDB_OK ? 1 : -result;
+    }
+    default:
+      return -MDB_ERR_BAD_STATE;  /* never started */
+  }
 }
 
 /* The strings must outlive the call, so they are handed out as pointers into

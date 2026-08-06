@@ -40,6 +40,13 @@ RUNTIME_METHODS='["ccall","cwrap","HEAPU8","HEAPU32","UTF8ToString","stringToUTF
 # performance work comes after the differential suite passes, and a stripped
 # build would make the first InnoDB failures much harder to read.
 #
+# EXIT_RUNTIME=0 because this is a library, not a program. There is no main(),
+# so with EXIT_RUNTIME=1 Emscripten tears the runtime down the moment control
+# returns to the event loop, and the next exported call aborts with "native
+# function called after runtime exit". Initialisation deliberately yields to
+# the event loop (see mdb_runtime_init_async), so the runtime has to outlive
+# it. Node still exits on its own once the pthread workers are gone.
+#
 # PTHREAD_POOL_SIZE_STRICT=2 turns pool exhaustion into a visible error rather
 # than a silent deadlock. InnoDB starts its background threads during
 # srv_start, before any query runs, so an undersized pool would otherwise hang
@@ -71,7 +78,7 @@ em++ -g -O2 -std=c++17 \
   -sMAXIMUM_MEMORY=2GB \
   -sPTHREAD_POOL_SIZE=16 \
   -sPTHREAD_POOL_SIZE_STRICT=2 \
-  -sEXIT_RUNTIME=1 \
+  -sEXIT_RUNTIME=0 \
   -sFORCE_FILESYSTEM=1 \
   -sASSERTIONS=2 \
   -sSTACK_SIZE=4MB \

@@ -65,6 +65,26 @@ typedef struct {
 */
 int mdb_runtime_init(int argc, const char *const *argv);
 
+/*
+  Non-blocking variant of mdb_runtime_init: runs the initialisation on a
+  dedicated thread and returns immediately, leaving the caller free to return
+  to its event loop. Poll mdb_runtime_init_poll for completion.
+
+  This exists because of how Emscripten implements the filesystem. MEMFS lives
+  in the JavaScript heap of the main thread, so 54 of the syscalls in a
+  threaded build are proxied to the main thread when a pthread makes them.
+  InnoDB does a lot of file I/O from background threads while starting up, so
+  calling mdb_runtime_init directly from the main thread deadlocks: the main
+  thread blocks inside mysql_server_init waiting for InnoDB, and InnoDB's
+  threads wait for the main thread to service their proxied opens and writes.
+
+  Native builds have no such constraint and can keep using mdb_runtime_init.
+*/
+int mdb_runtime_init_async(int argc, const char *const *argv);
+
+/* 0 = still running, 1 = finished successfully, negative = -mdb_status. */
+int mdb_runtime_init_poll(void);
+
 int mdb_runtime_shutdown(void);
 
 /* 1 once init has succeeded and shutdown has not run. */

@@ -55,6 +55,19 @@ void set_global_error(uint32_t code, const char *sql_state, const char *message)
    set_global_error. */
 void fill_global_error(mdb_error *out_error);
 
+/* Prepends the program name and copies the caller's argv, which it does not
+   own beyond the call. */
+std::vector<std::string> copy_server_args(int argc, const char *const *argv);
+
+/* The shared body of both init paths. */
+int run_server_init(std::vector<std::string> owned);
+
+/* Async init: see the comment on mdb_runtime_init_async in the public header
+   for why the wasm build cannot initialise on the main thread. */
+int start_async_init(std::vector<std::string> args);
+int init_state();
+int init_poll();
+
 }  // namespace mdb
 
 /*

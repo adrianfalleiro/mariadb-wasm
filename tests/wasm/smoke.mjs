@@ -198,13 +198,41 @@ const serverArgs = [
   "--character-sets-dir=/mariadb/charsets",
 ];
 
+/*
+  Initialisation runs on its own thread and we poll from the event loop rather
+  than calling mdb_runtime_init directly.
+
+  Emscripten keeps MEMFS in the main thread's JavaScript heap, so 54 syscalls
+  in a threaded build are proxied to the main thread when a pthread makes them.
+  InnoDB opens and writes its system tablespace and redo logs from background
+  threads during startup. Blocking the main thread inside mysql_server_init
+  therefore deadlocks it against the very threads it is waiting for — which is
+  what made startup a coin flip. Returning to the event loop between polls lets
+  those proxied calls be serviced.
+*/
 const argvPtr = allocCStringArray(serverArgs);
-const initStatus = call(
-  "mdb_runtime_init",
+let initStatus = call(
+  "mdb_runtime_init_async",
   "number",
   ["number", "number"],
   [serverArgs.length, argvPtr],
 );
+
+if (initStatus === MDB_OK) {
+  const deadlineMs = Date.now() + 60_000;
+  for (;;) {
+    const poll = call("mdb_runtime_init_poll", "number", []);
+    if (poll === 1) { initStatus = MDB_OK; break; }
+    if (poll < 0) { initStatus = -poll; break; }
+    if (Date.now() > deadlineMs) {
+      console.log("  FAIL initialisation did not finish within 60s");
+      initStatus = MDB_ERR_BAD_STATE;
+      break;
+    }
+    /* Yielding to the event loop is the point, not the delay. */
+    await new Promise((resolve) => setTimeout(resolve, 2));
+  }
+}
 freeAll();
 
 if (initStatus !== MDB_OK) {
