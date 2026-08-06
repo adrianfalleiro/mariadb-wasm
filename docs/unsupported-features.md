@@ -31,8 +31,8 @@ because "we chose not to" and "it cannot" are not the same claim.
 | Grants, stored routines, triggers, events, named time zones | All need `mysql.*` system tables. `CONVERT_TZ` with named zones will not work; offsets do |
 | Persistent index statistics | `mysql.innodb_table_stats` is absent — this is the warning at startup. The optimizer falls back to sampled estimates |
 | `storage: { type: "node" }` beyond the basics | Wired up and mountable, but restart-and-reopen is untested |
-| `SELECT ... FOR UPDATE`, lock-wait timeout, deadlock detection | Not exercised. They need two connections contending, which the differential suite's single-connection model does not do |
-| Isolation levels | Not exercised beyond the default |
+| Differential coverage of locking | The behaviour itself works and is tested (`package/test/concurrency.test.ts`), but against InnoDB's documented contract rather than against the native build — the differential runner is single-connection |
+| `SELECT ... FOR UPDATE` under `storage: node` | Only exercised on MEMFS |
 | `LOAD DATA INFILE` | Untested; would read from the virtual filesystem |
 | FULLTEXT, spatial | Compiled in but untested |
 | Multi-statement queries | The text protocol may accept them; not tested, and the result API returns only the first result set |

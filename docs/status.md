@@ -31,15 +31,19 @@ Honest list of what an acceptance review would still find:
 - **No datadir template.** `mysql.*` system tables are absent, so grants,
   stored routines, triggers, events and named time zones are unavailable.
   This is the largest functional gap.
-- **Locking behaviour untested.** `SELECT ... FOR UPDATE`, lock-wait timeout,
-  deadlock detection and isolation levels are not exercised; the differential
-  runner is single-connection.
+- **Locking is verified, but only against InnoDB's documented contract, not
+  differentially.** `SELECT ... FOR UPDATE`, lock waits that resolve, 1205
+  timeouts, 1213/40001 deadlock detection with a single victim, REPEATABLE
+  READ vs READ COMMITTED, and four concurrent writers all pass under wasm —
+  see `package/test/concurrency.test.ts`. The differential runner is
+  single-connection, so none of it is compared byte-for-byte against native.
 - **One MariaDB thread never exits** at shutdown. Worked around by skipping
   the wait; the thread has not been identified.
-- **Blocking ABI calls remain exposed** to the filesystem-proxying deadlock in
-  principle. Initialisation was the acute case and is fixed; queries have been
-  stable in every run, but the durable fix is to move all calls onto a
-  dedicated thread.
+- ~~Blocking ABI calls exposed to the filesystem-proxying deadlock.~~
+  **Closed.** Queries now run on their own thread and the package polls from
+  the event loop, so the main thread stays free. Prepared statements still
+  execute synchronously — they have shown no problem, but they are the
+  remaining call that blocks.
 - **~1 GB RSS** after a workload, uninvestigated.
 - **`dist/` ships no licence notices** — see `docs/licensing.md`.
 - **CI has never been executed.** The workflow is written against Ubuntu but

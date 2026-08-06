@@ -64,14 +64,18 @@ Working, with real gaps. All five suites pass:
 | `12-run-abi-smoke.sh` | 63 assertions, the C ABI natively |
 | `tests/wasm/smoke.mjs` | 32 assertions under wasm |
 | `13-run-differential.sh` | 97 statements, native vs wasm, with a negative control |
-| `package/test` | 25 tests, 3.1 s |
+| `package/test` | 31 tests, 4.6 s — including InnoDB locking under real concurrency |
+
+Concurrency is real: queries run on their own thread, so two connections
+genuinely contend. Lock waits resolve when the holder commits, time out with
+`1205` when it does not, and a deadlock produces `1213`/`40001` with exactly
+one victim.
 
 Read `docs/status.md` before relying on this. The short version: there is **no
 datadir template**, so the `mysql.*` system tables are absent and grants,
-stored routines, triggers and named time zones do not work. Locking behaviour
-(`SELECT ... FOR UPDATE`, deadlock detection, isolation levels) is untested.
-And durability is explicitly not provided — `innodb-flush-log-at-trx-commit=0`
-is a default here, and nothing validates crash recovery.
+stored routines, triggers and named time zones do not work. And durability is
+explicitly not provided — `innodb-flush-log-at-trx-commit=0` is a default here,
+and nothing validates crash recovery.
 
 ## Why Emscripten, not wasi-sdk
 

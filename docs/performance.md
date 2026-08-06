@@ -11,14 +11,30 @@ one machine, not a benchmark claim.
 | server create (module load + MariaDB init) | ~177 ms |
 | first connection | 0.5 ms |
 | first query | ~11 ms |
-| 1000 × `SELECT 1` | ~14 ms |
-| 1000 prepared inserts (autocommit) | ~84 ms |
+| 1000 × `SELECT 1` | ~43 ms (async path; ~20 ms synchronous) |
+| 1000 prepared inserts (autocommit) | ~43 ms |
 | 1000 inserts in one transaction | ~23 ms |
 | read 2000 rows | ~7 ms |
 | 1000 indexed point lookups | ~26 ms |
 | connection close | 0.2 ms |
 | **server close** | **~114 ms** (was 5119 ms) |
 | full package suite (25 tests) | **3.1 s** (was 42.8 s) |
+
+## A deliberate cost: queries run on their own thread
+
+Every query goes through `mdb_connection_query_async` and is polled from the
+event loop, which measures ~77 µs per round trip against ~20 µs for the
+synchronous call. That is paid on purpose.
+
+A blocking call owns the JavaScript thread. Two connections contending for a
+row lock could therefore never resolve — the holder cannot reach its COMMIT
+while the waiter blocks — so lock waits could only ever time out, and deadlock
+cycles could not form at all. It also keeps the main thread free to service
+MariaDB's proxied filesystem syscalls, which is the hazard that made startup a
+coin flip.
+
+`setImmediate`, not `setTimeout`: Node clamps even `setTimeout(0)` to about a
+millisecond, which measured **1156 ms** for the same 1000 queries against 77 ms.
 
 ## The one optimisation made so far
 
