@@ -30,8 +30,8 @@ await connection.close();
 await server.close();
 ```
 
-Roughly 180 ms to start a server, 0.5 ms to connect, ~14 ms for a thousand
-queries.
+Roughly 175 ms to start a server, 0.5 ms to connect, ~43 ms for a thousand
+queries, ~107 ms to shut down.
 
 ## What it is
 
