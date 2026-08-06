@@ -52,8 +52,19 @@ RUNTIME_METHODS='["ccall","cwrap","HEAPU8","HEAPU32","UTF8ToString","stringToUTF
 # the event loop (see mdb_runtime_init_async), so the runtime has to outlive
 # it. Node still exits on its own once the pthread workers are gone.
 #
-# PTHREAD_POOL_SIZE covers the ~11 workers a MariaDB startup needs plus
-# headroom for the per-query threads the async path creates.
+# PTHREAD_POOL_SIZE is a memory-versus-startup trade, measured rather than
+# guessed. Each pooled worker is a Node worker_thread with its own V8 isolate,
+# costing roughly 25 MB of RSS whether or not it is ever used; MariaDB needs
+# about 11 threads to start, and any beyond the pool are created on demand,
+# which costs an event-loop round trip each.
+#
+#   pool=4   305 MB RSS, 990 ms to create a server
+#   pool=8   344 MB RSS, 260 ms
+#   pool=16  592 MB RSS, 175 ms
+#
+# 8 takes nearly all of the memory saving for a fraction of the startup cost.
+# Query throughput is unaffected at every size. Memory matters more here
+# because test runners run several instances at once.
 #
 # STRICT is 0, not 2. It was 2 while the startup deadlock was being chased, to
 # turn pool exhaustion into a visible error rather than a silent hang. That is
@@ -106,7 +117,7 @@ em++ -std=c++17 \
   -sALLOW_MEMORY_GROWTH=1 \
   -sINITIAL_MEMORY=160MB \
   -sMAXIMUM_MEMORY=2GB \
-  -sPTHREAD_POOL_SIZE=16 \
+  -sPTHREAD_POOL_SIZE=8 \
   -sPTHREAD_POOL_SIZE_STRICT=0 \
   -sEXIT_RUNTIME=0 \
   -sFORCE_FILESYSTEM=1 \

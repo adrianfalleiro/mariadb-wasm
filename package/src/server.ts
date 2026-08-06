@@ -37,6 +37,19 @@ function defaultServerOptions(datadir: string): string[] {
     "--performance-schema=OFF",
     "--max-connections=20",
     "--innodb-buffer-pool-size=16M",
+    /*
+      MariaDB sizes these two for a dedicated database host: 128 MB each by
+      default, which together account for ~290 MB of the wasm heap before a
+      single query runs. Measured: they take the heap after initialisation
+      from 479 MB down to 192 MB, and RSS from 851 MB to 580 MB.
+
+      Both are pure caches — MyISAM key blocks and Aria pages — so this is a
+      performance setting, not a semantic one. Aria is kept at 8 MB rather
+      than 1 MB because it also backs internal temporary tables, which a
+      GROUP BY or DISTINCT will use.
+    */
+    "--key-buffer-size=1M",
+    "--aria-pagecache-buffer-size=8M",
     /* Not a durability guarantee: with MEMFS there is nothing to be durable
        to, and fsync per commit only costs proxied syscalls. */
     "--innodb-flush-log-at-trx-commit=0",

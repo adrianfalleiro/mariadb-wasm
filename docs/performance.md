@@ -8,10 +8,10 @@ one machine, not a benchmark claim.
 |---|---|
 | `mariadb.wasm` | 12.1 MB |
 | `mariadb.mjs` | 0.13 MB |
-| server create (module load + MariaDB init) | ~177 ms |
+| server create (module load + MariaDB init) | ~180 ms |
 | first connection | 0.5 ms |
 | first query | ~11 ms |
-| 1000 × `SELECT 1` | ~43 ms (async path; ~20 ms synchronous) |
+| 1000 × `SELECT 1` | ~30–80 ms, run to run (async path) |
 | 1000 prepared inserts (autocommit) | ~43 ms |
 | 1000 inserts in one transaction | ~23 ms |
 | read 2000 rows | ~7 ms |
@@ -75,9 +75,40 @@ instance is discarded.
 
 ## Memory
 
-RSS after the benchmark workload is ~1 GB, which is high and not yet
-investigated. `INITIAL_MEMORY` is 160 MB and the heap grows to ~500 MB during
-a workload; Node's own overhead and the `SharedArrayBuffer` per instance
-account for the rest. Four concurrent instances complete the isolation test on
-this host, but memory is the constraint that will bite first when scaling test
-workers, and it deserves measurement before anyone raises the worker count.
+Memory is the constraint that bites first when scaling test workers, so it was
+measured rather than estimated. Two causes, both fixed, each found by
+bisection rather than guesswork.
+
+**MariaDB's cache defaults.** `key_buffer_size` and `aria_pagecache_buffer_size`
+are 128 MB each — sized for a dedicated database host. Together they accounted
+for ~290 MB of wasm heap before a single query ran. Setting them to 1 MB and
+8 MB takes the heap after initialisation from 479 MB to 192 MB. Isolated one at
+a time: each was worth ~147 MB, and the table caches were worth nothing.
+They are pure caches, so this changes performance, not behaviour.
+
+**Pooled pthread workers.** Each is a Node `worker_thread` with its own V8
+isolate, costing ~25 MB of RSS whether used or not. MariaDB needs ~11 threads
+to start; anything beyond the pool is created on demand at the cost of an
+event-loop round trip.
+
+| `PTHREAD_POOL_SIZE` | RSS after init | server create |
+|---|---|---|
+| 4 | 305 MB | 990 ms |
+| **8** | **344 MB** | **260 ms** |
+| 16 | 592 MB | 175 ms |
+
+8 takes nearly all the memory saving for a fraction of the startup cost, and
+query throughput is unaffected at every size.
+
+Together:
+
+| | before | after |
+|---|---|---|
+| first instance | 908 MB | 508 MB |
+| each additional instance | ~550 MB | ~230 MB |
+| four concurrent instances | 2574 MB | 1222 MB |
+
+Still open: **memory is not returned on close** — closing four instances gives
+back only ~85 MB. The `SharedArrayBuffer` and the worker isolates are probably
+waiting on GC. It has not been chased, and it matters for a long-lived runner
+that creates and destroys many servers in one process.

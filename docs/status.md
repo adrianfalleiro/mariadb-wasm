@@ -48,7 +48,10 @@ Honest list of what an acceptance review would still find:
   the event loop, so the main thread stays free. Prepared statements still
   execute synchronously — they have shown no problem, but they are the
   remaining call that blocks.
-- **~1 GB RSS** after a workload, uninvestigated.
+- **Memory is not returned on close.** Closing four instances gives back only
+  ~85 MB of 1.2 GB. Per-instance cost is down 53% (see `docs/performance.md`),
+  but a long-lived runner creating and destroying many servers will still
+  accumulate.
 - **`dist/` ships no licence notices** — see `docs/licensing.md`.
 - **CI has never been executed.** The workflow is written against Ubuntu but
   the build scripts carry macOS assumptions (`clang++`, `-liconv`, `xcrun`).
