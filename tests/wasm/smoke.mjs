@@ -322,6 +322,68 @@ expectScalar(conn, "SELECT balance FROM users WHERE id=1", "55.0000",
   }
 }
 
+/* Prepared statements: bound through MariaDB's statement API, never by
+   interpolating into SQL text. */
+{
+  const sql = "INSERT INTO users(email, balance, payload, created_at)" +
+    " VALUES (?, ?, ?, ?)";
+  const sqlBytes = new TextEncoder().encode(sql);
+  const sqlPtr = _malloc(sqlBytes.length);
+  u8().set(sqlBytes, sqlPtr);
+
+  const stmt = call("mdb_statement_prepare", "number",
+    ["number", "number", "number"], [conn, sqlPtr, sqlBytes.length]);
+  _free(sqlPtr);
+
+  if (!stmt) fail("mdb_statement_prepare");
+  else {
+    ok("mdb_statement_prepare");
+
+    if (call("mdb_statement_param_count", "number", ["number"], [stmt]) !== 4)
+      fail("param_count should be 4");
+    else ok("param_count == 4");
+
+    const bindText = (index, text, fn = "mdb_statement_bind_string") => {
+      const bytes = new TextEncoder().encode(text);
+      const ptr = _malloc(bytes.length);
+      u8().set(bytes, ptr);
+      call(fn, "number", ["number", "number", "number", "number"],
+        [stmt, index, ptr, bytes.length]);
+      _free(ptr);
+    };
+
+    bindText(0, "d@example.com");
+    bindText(1, "98765.4321");            /* DECIMAL as text, never a double */
+    {
+      const blob = new Uint8Array([0x00, 0x01, 0x02, 0xff]);
+      const ptr = _malloc(blob.length);
+      u8().set(blob, ptr);
+      call("mdb_statement_bind_blob", "number",
+        ["number", "number", "number", "number"], [stmt, 2, ptr, blob.length]);
+      _free(ptr);
+    }
+    bindText(3, "2026-03-04 05:06:07.891011");
+
+    if (call("mdb_statement_execute", "number", ["number", "number"], [stmt, 0])
+        !== MDB_OK)
+      fail("mdb_statement_execute");
+    else ok("mdb_statement_execute (bound INSERT)");
+
+    call("mdb_statement_close", "number", ["number"], [stmt]);
+  }
+}
+
+expectScalar(conn, "SELECT balance FROM users WHERE email='d@example.com'",
+  "98765.4321", "bound DECIMAL stored exactly");
+expectScalar(conn, "SELECT HEX(payload) FROM users WHERE email='d@example.com'",
+  "000102FF", "bound binary parameter kept its NUL byte");
+expectScalar(conn, "SELECT created_at FROM users WHERE email='d@example.com'",
+  "2026-03-04 05:06:07.891011", "bound DATETIME(6) kept microseconds");
+
+if (call("mdb_live_statements", "number", []) !== 0)
+  fail("leaked statements");
+else ok("no leaked statements");
+
 if (call("mdb_connection_close", "number", ["number"], [conn]) !== MDB_OK)
   fail("mdb_connection_close");
 else ok("mdb_connection_close");

@@ -162,6 +162,61 @@ uint32_t mdb_result_column_charsetnr(mdb_result_handle result, uint32_t column);
 
 void mdb_result_free(mdb_result_handle result);
 
+/* -------------------------------------------------------------- statement */
+
+/*
+  Prepared statements exist so parameters are bound through MariaDB's
+  statement API rather than interpolated into SQL text. Interpolation in
+  JavaScript cannot be made correct — it has to reproduce MariaDB's quoting,
+  charset and SQL-mode rules — and it is how injection bugs get written.
+*/
+mdb_statement_handle mdb_statement_prepare(mdb_connection_handle connection,
+                                           const uint8_t *sql,
+                                           size_t sql_length);
+
+uint32_t mdb_statement_param_count(mdb_statement_handle statement);
+
+/*
+  Binding. Each call sets one parameter; values are copied, so the caller may
+  free its buffers immediately. Index is zero-based.
+
+  Integers are split by signedness because BIGINT UNSIGNED above 2^63 cannot
+  round-trip through a signed value, and JavaScript reaches those via BigInt.
+  Decimals and dates are bound with mdb_statement_bind_string, which sends
+  them as text for the server to parse in the column's own type — the same
+  path the text protocol takes, so no precision is lost to a double.
+*/
+int mdb_statement_bind_null(mdb_statement_handle statement, uint32_t index);
+int mdb_statement_bind_int64(mdb_statement_handle statement, uint32_t index,
+                             int64_t value);
+int mdb_statement_bind_uint64(mdb_statement_handle statement, uint32_t index,
+                              uint64_t value);
+int mdb_statement_bind_double(mdb_statement_handle statement, uint32_t index,
+                              double value);
+int mdb_statement_bind_string(mdb_statement_handle statement, uint32_t index,
+                              const uint8_t *data, size_t length);
+int mdb_statement_bind_blob(mdb_statement_handle statement, uint32_t index,
+                            const uint8_t *data, size_t length);
+
+/*
+  Executes with the currently bound parameters. As with
+  mdb_connection_query, *result is MDB_INVALID_HANDLE for statements that
+  return no rows; that is not an error.
+*/
+int mdb_statement_execute(mdb_statement_handle statement,
+                          mdb_result_handle *result);
+
+uint64_t mdb_statement_affected_rows(mdb_statement_handle statement);
+uint64_t mdb_statement_insert_id(mdb_statement_handle statement);
+
+int mdb_statement_last_error(mdb_statement_handle statement,
+                             mdb_error *out_error);
+
+/* Re-executable after this; bound parameters are cleared. */
+int mdb_statement_reset(mdb_statement_handle statement);
+
+int mdb_statement_close(mdb_statement_handle statement);
+
 #ifdef __cplusplus
 }
 #endif

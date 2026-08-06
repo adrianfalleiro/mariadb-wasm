@@ -383,6 +383,179 @@ int main(int argc, char **argv)
     }
   }
 
+  /* --- prepared statements --------------------------------------------- */
+  {
+    const char *sql =
+      "INSERT INTO users(email, balance, payload, note, created_at)"
+      " VALUES (?, ?, ?, ?, ?)";
+    mdb_statement_handle stmt =
+      mdb_statement_prepare(conn, (const uint8_t *) sql, strlen(sql));
+
+    if (stmt == MDB_INVALID_HANDLE)
+      fail("mdb_statement_prepare");
+    else
+    {
+      ok("mdb_statement_prepare");
+
+      if (mdb_statement_param_count(stmt) != 5)
+        fail("param_count: expected 5, got %u", mdb_statement_param_count(stmt));
+      else
+        ok("param_count == 5");
+
+      mdb_statement_bind_string(stmt, 0, (const uint8_t *) "c@example.com", 13);
+      /* DECIMAL bound as text: routing it through a double would lose exactly
+         the precision this column exists to keep. */
+      mdb_statement_bind_string(stmt, 1, (const uint8_t *) "12345.6789", 10);
+      {
+        /* Binary with an embedded NUL, to prove binding is length-delimited. */
+        static const uint8_t blob[4] = { 0x00, 0x01, 0x02, 0xFF };
+        mdb_statement_bind_blob(stmt, 2, blob, sizeof blob);
+      }
+      mdb_statement_bind_null(stmt, 3);
+      mdb_statement_bind_string(stmt, 4,
+                                (const uint8_t *) "2026-03-04 05:06:07.891011", 26);
+
+      if (mdb_statement_execute(stmt, NULL) != MDB_OK)
+      {
+        mdb_error error;
+        mdb_statement_last_error(stmt, &error);
+        fail("mdb_statement_execute: %u/%s %s", error.code, error.sql_state,
+             error.message);
+      }
+      else
+        ok("mdb_statement_execute (INSERT with 5 params)");
+
+      if (mdb_statement_affected_rows(stmt) != 1)
+        fail("statement affected_rows: expected 1, got %llu",
+             (unsigned long long) mdb_statement_affected_rows(stmt));
+      else
+        ok("statement affected_rows == 1");
+
+      mdb_statement_close(stmt);
+    }
+  }
+
+  /* Read the bound row back through the text protocol: values must be
+     identical whichever protocol wrote them. */
+  expect_scalar(conn, "SELECT balance FROM users WHERE email='c@example.com'",
+                "12345.6789", "bound DECIMAL stored exactly");
+  expect_scalar(conn, "SELECT HEX(payload) FROM users WHERE email='c@example.com'",
+                "000102FF", "bound binary parameter kept its NUL byte");
+  expect_scalar(conn, "SELECT created_at FROM users WHERE email='c@example.com'",
+                "2026-03-04 05:06:07.891011",
+                "bound DATETIME(6) kept microseconds");
+  expect_scalar(conn,
+                "SELECT note IS NULL FROM users WHERE email='c@example.com'",
+                "1", "bound NULL parameter stored as NULL");
+
+  /* A SELECT through the binary protocol must produce the same bytes as the
+     text protocol — that equivalence is what lets the decoder be shared. */
+  {
+    const char *sql = "SELECT balance, note FROM users WHERE email = ?";
+    mdb_statement_handle stmt =
+      mdb_statement_prepare(conn, (const uint8_t *) sql, strlen(sql));
+    mdb_result_handle result = MDB_INVALID_HANDLE;
+
+    mdb_statement_bind_string(stmt, 0, (const uint8_t *) "c@example.com", 13);
+
+    if (mdb_statement_execute(stmt, &result) != MDB_OK
+        || result == MDB_INVALID_HANDLE)
+      fail("prepared SELECT did not return a result set");
+    else
+    {
+      if (mdb_result_row_count(result) != 1)
+        fail("prepared SELECT row_count: expected 1, got %llu",
+             (unsigned long long) mdb_result_row_count(result));
+      else
+        ok("prepared SELECT row_count == 1");
+
+      if (mdb_result_next(result) != 1)
+        fail("prepared SELECT returned no row");
+      else
+      {
+        const uint8_t *data = mdb_result_value_data(result, 0);
+        size_t length = mdb_result_value_length(result, 0);
+
+        if (!data || length != 10 || memcmp(data, "12345.6789", 10) != 0)
+          fail("prepared SELECT DECIMAL: got '%.*s'", (int) length,
+               data ? (const char *) data : "");
+        else
+          ok("prepared SELECT returns DECIMAL as exact text");
+
+        if (!mdb_result_value_is_null(result, 1))
+          fail("prepared SELECT: NULL column did not read as NULL");
+        else
+          ok("prepared SELECT preserves NULL");
+      }
+
+      if (mdb_result_next(result) != 0)
+        fail("prepared SELECT: expected exactly one row");
+      else
+        ok("prepared SELECT ends cleanly");
+
+      mdb_result_free(result);
+    }
+
+    /* Statement reuse after reset, with a different parameter. */
+    if (mdb_statement_reset(stmt) != MDB_OK)
+      fail("mdb_statement_reset");
+    else
+      ok("mdb_statement_reset");
+
+    mdb_statement_bind_string(stmt, 0, (const uint8_t *) "a@example.com", 13);
+    result = MDB_INVALID_HANDLE;
+    if (mdb_statement_execute(stmt, &result) != MDB_OK
+        || result == MDB_INVALID_HANDLE)
+      fail("statement reuse: execute failed");
+    else
+    {
+      if (mdb_result_next(result) != 1)
+        fail("statement reuse: no row");
+      else
+      {
+        const uint8_t *data = mdb_result_value_data(result, 0);
+        size_t length = mdb_result_value_length(result, 0);
+        if (!data || length != 7 || memcmp(data, "55.0000", 7) != 0)
+          fail("statement reuse: expected 55.0000, got '%.*s'", (int) length,
+               data ? (const char *) data : "");
+        else
+          ok("statement reuse with a new parameter");
+      }
+      mdb_result_free(result);
+    }
+
+    mdb_statement_close(stmt);
+
+    if (mdb_live_statements() != 0)
+      fail("leaked %u statement(s)", mdb_live_statements());
+    else
+      ok("no leaked statements");
+  }
+
+  /* Error propagation through the statement path. */
+  {
+    const char *bad = "SELECT * FROM no_such_table WHERE x = ?";
+    mdb_statement_handle stmt =
+      mdb_statement_prepare(conn, (const uint8_t *) bad, strlen(bad));
+
+    if (stmt != MDB_INVALID_HANDLE)
+    {
+      fail("preparing against a missing table unexpectedly succeeded");
+      mdb_statement_close(stmt);
+    }
+    else
+    {
+      mdb_error error;
+      mdb_connection_last_error(conn, &error);
+      /* 1146 = ER_NO_SUCH_TABLE, SQLSTATE 42S02. */
+      if (error.code != 1146 || strcmp(error.sql_state, "42S02") != 0)
+        fail("prepare error: expected 1146/42S02, got %u/%s", error.code,
+             error.sql_state);
+      else
+        ok("prepare failure -> errno 1146, SQLSTATE 42S02");
+    }
+  }
+
   if (mdb_connection_close(conn) != MDB_OK)
     fail("mdb_connection_close");
   else

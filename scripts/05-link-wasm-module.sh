@@ -68,6 +68,7 @@ em++ -g -O2 -std=c++17 \
   "$ROOT/native/src/runtime.cc" \
   "$ROOT/native/src/connection.cc" \
   "$ROOT/native/src/result.cc" \
+  "$ROOT/native/src/statement.cc" \
   "$LIB" \
   "$BUILD/tpool/libtpool.a" \
   -sENVIRONMENT=node \

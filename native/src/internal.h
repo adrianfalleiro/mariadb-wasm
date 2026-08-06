@@ -28,22 +28,72 @@ struct Connection {
   void clear_error();
 };
 
-/* A buffered result set. mysql_store_result is used rather than use_result so
-   row_count is available and so a half-read result cannot wedge the
-   connection when JavaScript abandons iteration — which it will, on any test
-   that throws mid-loop. */
+/*
+  A buffered result set, from either the text protocol (mysql_store_result) or
+  a prepared statement (the binary protocol). Both are buffered rather than
+  streamed so row_count is available and so a half-read result cannot wedge
+  the connection when JavaScript abandons iteration — which it will, on any
+  test that throws mid-loop.
+
+  One struct with a discriminator rather than two, because the result half of
+  the ABI must behave identically whichever protocol produced the rows.
+  Anything else pushes the distinction out to the TypeScript decoder, where it
+  would show up as prepared statements quietly returning different types.
+*/
 struct Result {
-  MYSQL_RES *res = nullptr;
-  MYSQL_ROW current_row = nullptr;      /* owned by res */
-  unsigned long *current_lengths = nullptr;
+  bool from_statement = false;
+
+  MYSQL_RES *res = nullptr;             /* metadata for both; rows for text */
   uint32_t column_count = 0;
   MYSQL_FIELD *fields = nullptr;        /* owned by res */
+
+  /* Text protocol. */
+  MYSQL_ROW current_row = nullptr;      /* owned by res */
+  unsigned long *current_lengths = nullptr;
+
+  /* Binary protocol. Borrowed; the Statement owns it. */
+  MYSQL_STMT *stmt = nullptr;
+  std::vector<MYSQL_BIND> binds;
+  std::vector<std::vector<char>> buffers;
+  std::vector<unsigned long> lengths;
+  std::vector<my_bool> nulls;
+  std::vector<my_bool> truncated;
+  bool row_available = false;
 
   ~Result();
 };
 
+/* A prepared statement plus the storage backing its bound parameters.
+   MYSQL_BIND holds pointers, not values, so the buffers must outlive
+   execution — keeping them here is what makes "values are copied" true at the
+   ABI boundary. */
+struct Statement {
+  MYSQL_STMT *stmt = nullptr;
+  uint32_t param_count = 0;
+  std::vector<MYSQL_BIND> binds;
+  std::vector<std::vector<char>> buffers;
+  std::vector<unsigned long> lengths;
+  std::vector<my_bool> nulls;
+
+  uint32_t last_errno = 0;
+  std::string last_sql_state;
+  std::string last_message;
+
+  ~Statement();
+
+  void reset_bindings();
+  void capture_error();
+};
+
 HandleTable<Connection> &connections();
 HandleTable<Result> &results();
+HandleTable<Statement> &statements();
+
+/* Builds a Result from an executed statement, binding every column as text.
+   Returns nullptr and sets the statement's error when metadata or store
+   fails; a statement that legitimately returns no rows yields nullptr with no
+   error recorded, so callers must check the statement's errno. */
+std::unique_ptr<Result> materialise_statement_result(Statement &statement);
 
 bool runtime_ready();
 void set_runtime_ready(bool ready);

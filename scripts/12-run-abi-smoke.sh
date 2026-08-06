@@ -29,6 +29,7 @@ clang++ -g -O1 -std=c++17 \
   "$ROOT/native/src/runtime.cc" \
   "$ROOT/native/src/connection.cc" \
   "$ROOT/native/src/result.cc" \
+  "$ROOT/native/src/statement.cc" \
   "$ROOT/tests/native/abi_smoke.c" \
   "$LIB" \
   "$BUILD/tpool/libtpool.a" \

@@ -19,7 +19,9 @@ uint64_t mdb_result_row_count(mdb_result_handle result) {
   if (!res)
     return 0;
 
-  /* Meaningful because results are buffered with mysql_store_result. */
+  /* Meaningful because both protocols buffer the whole result. */
+  if (res->from_statement)
+    return static_cast<uint64_t>(mysql_stmt_num_rows(res->stmt));
   return static_cast<uint64_t>(mysql_num_rows(res->res));
 
   MDB_GUARD_END(0)
@@ -31,6 +33,28 @@ int mdb_result_next(mdb_result_handle result) {
   mdb::Result *res = mdb::results().get(result);
   if (!res)
     return -MDB_ERR_BAD_HANDLE;
+
+  if (res->from_statement) {
+    int status = mysql_stmt_fetch(res->stmt);
+    if (status == MYSQL_NO_DATA) {
+      res->row_available = false;
+      return 0;
+    }
+    /* MYSQL_DATA_TRUNCATED means a column did not fit its buffer. Buffers are
+       sized from max_length over the whole stored result, so this should be
+       unreachable; treating it as success would silently hand back a clipped
+       value, which is the one outcome worth failing loudly on. */
+    if (status == MYSQL_DATA_TRUNCATED) {
+      res->row_available = false;
+      return -MDB_ERR_INTERNAL;
+    }
+    if (status != 0) {
+      res->row_available = false;
+      return -MDB_ERR_MYSQL;
+    }
+    res->row_available = true;
+    return 1;
+  }
 
   res->current_row = mysql_fetch_row(res->res);
   if (!res->current_row) {
@@ -50,12 +74,20 @@ const uint8_t *mdb_result_value_data(mdb_result_handle result, uint32_t column) 
   MDB_GUARD_BEGIN
 
   mdb::Result *res = mdb::results().get(result);
-  if (!res || !res->current_row || column >= res->column_count)
+  if (!res || column >= res->column_count)
     return nullptr;
 
   /* NULL and zero-length are different: NULL yields a null pointer here and 1
      from value_is_null, while a zero-length value yields a non-null pointer
      and length 0. */
+  if (res->from_statement) {
+    if (!res->row_available || res->nulls[column])
+      return nullptr;
+    return reinterpret_cast<const uint8_t *>(res->buffers[column].data());
+  }
+
+  if (!res->current_row)
+    return nullptr;
   return reinterpret_cast<const uint8_t *>(res->current_row[column]);
 
   MDB_GUARD_END(nullptr)
@@ -65,9 +97,17 @@ size_t mdb_result_value_length(mdb_result_handle result, uint32_t column) {
   MDB_GUARD_BEGIN
 
   mdb::Result *res = mdb::results().get(result);
-  if (!res || !res->current_lengths || column >= res->column_count)
+  if (!res || column >= res->column_count)
     return 0;
 
+  if (res->from_statement) {
+    if (!res->row_available || res->nulls[column])
+      return 0;
+    return static_cast<size_t>(res->lengths[column]);
+  }
+
+  if (!res->current_lengths)
+    return 0;
   return static_cast<size_t>(res->current_lengths[column]);
 
   MDB_GUARD_END(0)
@@ -77,9 +117,14 @@ int mdb_result_value_is_null(mdb_result_handle result, uint32_t column) {
   MDB_GUARD_BEGIN
 
   mdb::Result *res = mdb::results().get(result);
-  if (!res || !res->current_row || column >= res->column_count)
+  if (!res || column >= res->column_count)
     return 1;  /* absent reads as NULL rather than as empty */
 
+  if (res->from_statement)
+    return (!res->row_available || res->nulls[column]) ? 1 : 0;
+
+  if (!res->current_row)
+    return 1;
   return res->current_row[column] == nullptr ? 1 : 0;
 
   MDB_GUARD_END(1)

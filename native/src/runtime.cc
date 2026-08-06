@@ -75,6 +75,13 @@ void Connection::clear_error() {
 }
 
 Result::~Result() {
+  /* For statement results this frees the metadata; the MYSQL_STMT itself is
+     borrowed from the Statement and must not be closed here. Its buffered
+     rows are released so the connection is not left mid-result. */
+  if (from_statement && stmt) {
+    mysql_stmt_free_result(stmt);
+    stmt = nullptr;
+  }
   if (res) {
     mysql_free_result(res);
     res = nullptr;
@@ -125,10 +132,11 @@ int mdb_runtime_shutdown(void) {
   if (!mdb::runtime_ready())
     return MDB_OK;  /* idempotent: shutting down a dead runtime is not an error */
 
-  /* Results before connections: a MYSQL_RES holds memory owned by its
-     connection, and closing a connection that still has live results is
-     exactly the shape that leaks or double-frees. */
+  /* Ordering matters: a Result may borrow a statement's MYSQL_STMT, and both
+     hold memory owned by their connection. Tearing down in the other
+     direction is exactly the shape that leaks or double-frees. */
   mdb::results().drain().clear();
+  mdb::statements().drain().clear();
   mdb::connections().drain().clear();
 
   mdb::set_runtime_ready(false);
@@ -154,7 +162,7 @@ int mdb_last_global_error(mdb_error *out_error) {
 
 uint32_t mdb_live_connections(void) { return mdb::connections().live(); }
 uint32_t mdb_live_results(void) { return mdb::results().live(); }
-uint32_t mdb_live_statements(void) { return 0; }  /* until prepared statements land */
+uint32_t mdb_live_statements(void) { return mdb::statements().live(); }
 
 }  // extern "C"
 
@@ -199,6 +207,7 @@ int run_server_init(std::vector<std::string> owned) {
      first use. */
   connections();
   results();
+  statements();
 
   set_runtime_ready(true);
   return MDB_OK;
