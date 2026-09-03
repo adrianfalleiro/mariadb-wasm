@@ -1,0 +1,7 @@
+{
+  "name": "mariadb-wasm-bench",
+  "private": true,
+  "type": "module",
+  "description": "Test-suite benchmark: embedded wasm vs a real MySQL server. Dev-only; not part of the published package.",
+  "dependencies": { "mysql2": "^3.24.3" }
+}
