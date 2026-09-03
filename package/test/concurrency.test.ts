@@ -154,6 +154,116 @@ describe("row locking", () => {
   }, { timeout: 60_000 });
 });
 
+/*
+  The same contention, driven through execute() rather than query().
+
+  This is a separate block because it exercises a different ABI path, not a
+  different database behaviour. query() has run on its own thread since
+  Phase 12; prepare and execute did not, so a prepared statement blocked the
+  thread that services MariaDB's proxied filesystem syscalls under wasm. These
+  tests fail by hanging if that ever comes back — the holder cannot reach its
+  COMMIT while the waiter owns the JavaScript thread.
+*/
+describe("row locking through prepared statements", () => {
+  test("a lock wait resolves when the holder commits", async () => {
+    await seed([[1, 10]]);
+    const a = await server.connect({ database: "lock_db" });
+    const b = await server.connect({ database: "lock_db" });
+
+    try {
+      await a.beginTransaction();
+      await a.execute("UPDATE t SET v = ? WHERE id = ?", [11, 1]);
+
+      await b.beginTransaction();
+      const waiting = b.execute("SELECT v FROM t WHERE id = ? FOR UPDATE", [1]);
+
+      assert.equal(
+        await settledWithin(waiting, 200),
+        false,
+        "B should be blocked while A holds the lock",
+      );
+
+      await a.commit();
+
+      const [rows] = await waiting;
+      assert.equal(rows[0].v, 11, "B should see A's committed value");
+      await b.rollback();
+    } finally {
+      await a.close();
+      await b.close();
+    }
+  }, { timeout: 60_000 });
+
+  test("a deadlock still resolves when both sides are prepared", async () => {
+    await seed([[1, 10], [2, 20]]);
+    const a = await server.connect({ database: "lock_db" });
+    const b = await server.connect({ database: "lock_db" });
+
+    try {
+      await a.beginTransaction();
+      await b.beginTransaction();
+
+      await a.execute("UPDATE t SET v = ? WHERE id = ?", [100, 1]);
+      await b.execute("UPDATE t SET v = ? WHERE id = ?", [200, 2]);
+
+      const outcomes = await Promise.allSettled([
+        a.execute("UPDATE t SET v = ? WHERE id = ?", [101, 2]),
+        b.execute("UPDATE t SET v = ? WHERE id = ?", [201, 1]),
+      ]);
+
+      const victims = outcomes.filter(
+        (outcome) =>
+          outcome.status === "rejected" &&
+          outcome.reason instanceof MariaDbEmbeddedError &&
+          outcome.reason.code === 1213,
+      );
+
+      assert.equal(
+        victims.length,
+        1,
+        `expected exactly one deadlock victim, got ${victims.length}`,
+      );
+
+      const survivor = outcomes[0].status === "fulfilled" ? a : b;
+      await survivor.commit();
+    } finally {
+      await a.close().catch(() => {});
+      await b.close().catch(() => {});
+    }
+  }, { timeout: 60_000 });
+
+  test("two connections interleave prepared reads and writes", async () => {
+    await seed([]);
+    const a = await server.connect({ database: "lock_db" });
+    const b = await server.connect({ database: "lock_db" });
+
+    try {
+      /* Disjoint rows, both sides preparing and executing throughout. If
+         either side serialised the other this would still pass — the point is
+         that it must not hang, and that nothing is lost. */
+      await Promise.all([
+        (async () => {
+          for (let i = 0; i < 20; i++)
+            await a.execute("INSERT INTO t VALUES (?, ?)", [i, 1]);
+        })(),
+        (async () => {
+          for (let i = 100; i < 120; i++)
+            await b.execute("INSERT INTO t VALUES (?, ?)", [i, 2]);
+        })(),
+      ]);
+
+      const [rows] = await a.execute(
+        "SELECT COUNT(*) AS n FROM t WHERE v IN (?, ?)",
+        [1, 2],
+      );
+      assert.equal(rows[0].n, 40n, "every prepared insert should have landed");
+    } finally {
+      await a.close();
+      await b.close();
+    }
+  }, { timeout: 120_000 });
+});
+
 describe("deadlock detection", () => {
   test("InnoDB breaks a cycle with 1213 and picks exactly one victim", async () => {
     await seed([[1, 10], [2, 20]]);

@@ -250,19 +250,34 @@ export class WasmRuntime {
 
   shutdown(): number {
     /*
-      Skip MariaDB's wait for threads to finish. Exactly one thread never
-      calls my_thread_end under wasm, so the wait always runs its full 5
-      seconds — which would be the single largest cost in a test suite that
-      creates a server per file.
+      MariaDB's wait for its registered threads is left in place, deliberately.
 
-      Safe here only because terminateThreads() runs immediately afterwards
-      and the whole instance is then discarded. See the note on
-      mdb_runtime_set_shutdown_wait_seconds in the ABI header.
+      It used to be skipped: one thread never called my_thread_end, so the
+      wait ran its full five seconds on every shutdown and printed "1 threads
+      didn't exit". That thread was the one running mdb_runtime_init_async —
+      mysql_server_init registers its caller with mysys, and it exited without
+      unregistering. It now ends properly, the count reaches zero, and the
+      wait returns immediately.
+
+      Keeping the wait is worth more than the microseconds it costs when it
+      succeeds. MariaDB skips destroying its global mutexes when the wait
+      times out, precisely because a live thread might still touch them, so a
+      shutdown that waits is the one that actually establishes there is
+      nothing left running. shutdownIsClean() below is how a regression here
+      surfaces as a test failure rather than as five silent seconds.
     */
-    this.#module.ccall(
-      "mdb_runtime_set_shutdown_wait_seconds", null, ["number"], [0],
-    );
     return this.#call("mdb_runtime_shutdown", [], []);
+  }
+
+  /*
+    Whether the last shutdown drained every MariaDB-registered thread.
+
+    my_thread_global_end reports a timeout on stderr and nowhere else — it has
+    no return value and mysql_server_end swallows it — so scanning the
+    captured output is the only way to observe it.
+  */
+  shutdownIsClean(): boolean {
+    return !this.#stderr.some((line) => line.includes("threads didn't exit"));
   }
 
   isReady(): boolean {
@@ -445,19 +460,51 @@ export class WasmRuntime {
 
   /* --- statements -------------------------------------------------------- */
 
-  statementPrepare(connection: number, sql: string): number {
+  /*
+    Prepared statements go through the same thread-and-poll path as plain
+    queries, and for the same two reasons.
+
+    Preparing and executing both reach the server: prepare parses the SQL and
+    opens the tables it names, execute does the actual work. Both are real
+    filesystem I/O, and under wasm those syscalls are proxied to the main
+    thread — so running them on the main thread blocks the very thread that
+    has to service them. That is the shape of the startup deadlock, and until
+    this it was still reachable through execute().
+
+    It also makes concurrency work through parameters, not just through SQL
+    text: two connections can now contend for a row lock via execute(), which
+    is what most callers actually write.
+  */
+  async statementPrepareAsync(connection: number, sql: string): Promise<number> {
     const bytes = encoder.encode(sql);
-    const ptr = this.#allocBytes(bytes);
+    const sqlPtr = this.#allocBytes(bytes);
+
     try {
-      const handle = this.#call(
-        "mdb_statement_prepare",
+      const submitted = this.#call(
+        "mdb_statement_prepare_async",
         ["number", "number", "number"],
-        [connection, ptr, bytes.length],
+        [connection, sqlPtr, bytes.length],
       );
-      if (!handle) throw this.connectionError(connection, sql);
-      return handle;
+      if (submitted !== MDB_OK) throw this.connectionError(connection, sql);
     } finally {
-      this.#free(ptr);
+      /* The ABI copies the SQL on this thread before returning. */
+      this.#free(sqlPtr);
+    }
+
+    const outPtr = this.#module._malloc(4);
+    try {
+      for (;;) {
+        const poll = this.#call(
+          "mdb_statement_prepare_poll",
+          ["number", "number"],
+          [connection, outPtr],
+        );
+        if (poll === 1) return this.#u32[outPtr >> 2];
+        if (poll < 0) throw this.connectionError(connection, sql);
+        await new Promise((resolve) => setImmediate(resolve));
+      }
+    } finally {
+      this.#free(outPtr);
     }
   }
 
@@ -504,17 +551,31 @@ export class WasmRuntime {
     }
   }
 
-  statementExecute(handle: number): number {
+  /* The bind_* calls above stay synchronous: they only copy into the
+     statement's own buffers and never reach the server. Binding must be
+     finished before this is called, since the worker thread reads those
+     buffers. */
+  async statementExecuteAsync(handle: number): Promise<number> {
+    const submitted = this.#call(
+      "mdb_statement_execute_async",
+      ["number"],
+      [handle],
+    );
+    if (submitted !== MDB_OK) throw this.statementError(handle);
+
     const outPtr = this.#module._malloc(4);
     this.#u32[outPtr >> 2] = 0;
     try {
-      const status = this.#call(
-        "mdb_statement_execute",
-        ["number", "number"],
-        [handle, outPtr],
-      );
-      if (status !== MDB_OK) throw this.statementError(handle);
-      return this.#u32[outPtr >> 2];
+      for (;;) {
+        const poll = this.#call(
+          "mdb_statement_execute_poll",
+          ["number", "number"],
+          [handle, outPtr],
+        );
+        if (poll === 1) return this.#u32[outPtr >> 2];
+        if (poll < 0) throw this.statementError(handle);
+        await new Promise((resolve) => setImmediate(resolve));
+      }
     } finally {
       this.#free(outPtr);
     }

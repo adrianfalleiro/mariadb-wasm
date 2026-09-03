@@ -87,17 +87,22 @@ int mdb_runtime_init_poll(void);
 
 /*
   How long mysql_server_end waits for MariaDB-registered threads to finish,
-  in seconds. MariaDB's default is 5.
+  in seconds. MariaDB's default is 5, and that default is now what this build
+  uses: every thread this wrapper starts pairs mysql_thread_init with
+  mysql_thread_end, so the count reaches zero and the wait returns at once.
 
-  Under wasm exactly one thread never calls my_thread_end, so the wait always
-  runs to completion and every shutdown costs a flat 5 seconds — ruinous for a
-  test suite that creates a server per file. Setting this to 0 skips the wait.
+  It did not always. mysql_server_init registers its *calling* thread with
+  mysys, and under wasm that call happens on the dedicated initialisation
+  thread (see mdb_runtime_init_async), which then exited without
+  unregistering. THR_thread_count never reached zero, so every shutdown paid
+  the full five seconds and printed "1 threads didn't exit". Skipping the wait
+  was the workaround; ending the thread properly is the fix.
 
-  That is safe only because the caller then terminates every Emscripten worker
-  and discards the whole wasm instance, which is what the TypeScript layer
-  does. It is not safe in a process that intends to keep running: MariaDB
-  deliberately leaves its global mutexes undestroyed when the wait times out,
-  precisely to avoid a use-after-free by a thread that is still live.
+  The knob is kept because the wait is a real safety property worth being able
+  to bound: MariaDB deliberately leaves its global mutexes undestroyed when it
+  times out, precisely to avoid a use-after-free by a thread that is still
+  live. Setting this to 0 skips the wait, which is only safe for a caller that
+  then discards the whole instance.
 */
 void mdb_runtime_set_shutdown_wait_seconds(uint32_t seconds);
 
@@ -216,6 +221,27 @@ mdb_statement_handle mdb_statement_prepare(mdb_connection_handle connection,
                                            const uint8_t *sql,
                                            size_t sql_length);
 
+/*
+  Non-blocking prepare, polled with mdb_statement_prepare_poll.
+
+  Preparing is not a local operation: the server parses the statement and
+  opens the tables it names, which is real filesystem work. Under wasm that
+  work is done through syscalls proxied to the main thread, so doing it *on*
+  the main thread is the same shape as the startup deadlock — the thread that
+  has to service the I/O is the one blocked waiting for it.
+
+  Keyed on the connection rather than on a statement handle for the obvious
+  reason: there is no statement yet. On success the poll yields one.
+*/
+int mdb_statement_prepare_async(mdb_connection_handle connection,
+                                const uint8_t *sql,
+                                size_t sql_length);
+
+/* 0 = still running, 1 = finished (handle in *statement), negative =
+   -mdb_status, with detail from mdb_connection_last_error. */
+int mdb_statement_prepare_poll(mdb_connection_handle connection,
+                               mdb_statement_handle *statement);
+
 uint32_t mdb_statement_param_count(mdb_statement_handle statement);
 
 /*
@@ -247,6 +273,29 @@ int mdb_statement_bind_blob(mdb_statement_handle statement, uint32_t index,
 */
 int mdb_statement_execute(mdb_statement_handle statement,
                           mdb_result_handle *result);
+
+/*
+  Non-blocking execute, polled with mdb_statement_execute_poll. Same reasoning
+  as mdb_connection_query_async, and it is what makes two connections able to
+  contend for a row lock through prepared statements rather than only through
+  the text protocol.
+
+  Bind before submitting: the bind_* calls only copy into the statement's own
+  buffers and never reach the server, so they stay synchronous. Rebinding
+  while an execution is in flight is a caller bug — the worker is reading
+  those buffers.
+
+  One call at a time per *connection*, not per statement: two statements
+  prepared on the same connection share a single MYSQL, so submitting one
+  while the other is running returns MDB_ERR_BAD_STATE.
+*/
+int mdb_statement_execute_async(mdb_statement_handle statement);
+
+/* 0 = still running, 1 = finished (result in *result, MDB_INVALID_HANDLE for
+   statements returning no rows), negative = -mdb_status with detail from
+   mdb_statement_last_error. */
+int mdb_statement_execute_poll(mdb_statement_handle statement,
+                               mdb_result_handle *result);
 
 uint64_t mdb_statement_affected_rows(mdb_statement_handle statement);
 uint64_t mdb_statement_insert_id(mdb_statement_handle statement);

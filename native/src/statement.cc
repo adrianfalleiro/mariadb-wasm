@@ -155,6 +155,85 @@ int bind_scalar(Statement &statement, uint32_t index, T value,
 }
 
 }  // namespace
+
+int prepare_statement_now(Connection &connection,
+                          mdb_connection_handle connection_handle,
+                          const std::string &sql,
+                          mdb_statement_handle *out_statement) {
+  auto statement = std::unique_ptr<Statement>(new Statement());
+  statement->owner = connection_handle;
+  statement->stmt = mysql_stmt_init(connection.mysql);
+  if (!statement->stmt) {
+    connection.capture_error();
+    return MDB_ERR_MYSQL;
+  }
+
+  if (mysql_stmt_prepare(statement->stmt, sql.data(),
+                         static_cast<unsigned long>(sql.size())) != 0) {
+    statement->capture_error();
+    /* Also on the connection: the caller has no statement handle to ask. */
+    connection.last_errno = statement->last_errno;
+    connection.last_sql_state = statement->last_sql_state;
+    connection.last_message = statement->last_message;
+    set_global_error(statement->last_errno,
+                     statement->last_sql_state.c_str(),
+                     statement->last_message.c_str());
+    return MDB_ERR_MYSQL;
+  }
+
+  statement->param_count =
+      static_cast<uint32_t>(mysql_stmt_param_count(statement->stmt));
+  statement->reset_bindings();
+
+  mdb_statement_handle handle = statements().insert(std::move(statement));
+  if (handle == MDB_INVALID_HANDLE) {
+    connection.last_errno = 0;
+    connection.last_sql_state = "HY000";
+    connection.last_message = "statement handle table exhausted";
+    set_global_error(0, "HY000", "statement handle table exhausted");
+    return MDB_ERR_NO_MEMORY;
+  }
+
+  *out_statement = handle;
+  return MDB_OK;
+}
+
+int execute_statement_now(Statement &statement, mdb_result_handle *out_result) {
+  statement.last_errno = 0;
+  statement.last_sql_state.clear();
+  statement.last_message.clear();
+
+  if (statement.param_count > 0 &&
+      mysql_stmt_bind_param(statement.stmt, statement.binds.data()) != 0) {
+    statement.capture_error();
+    return MDB_ERR_MYSQL;
+  }
+
+  if (mysql_stmt_execute(statement.stmt) != 0) {
+    statement.capture_error();
+    return MDB_ERR_MYSQL;
+  }
+
+  std::unique_ptr<Result> materialised = materialise_statement_result(statement);
+
+  if (!materialised) {
+    /* No metadata means no result set, which is normal for INSERT and DDL.
+       An error during store/bind sets errno, which is how the two are told
+       apart. */
+    return statement.last_errno != 0 ? MDB_ERR_MYSQL : MDB_OK;
+  }
+
+  mdb_result_handle handle = results().insert(std::move(materialised));
+  if (handle == MDB_INVALID_HANDLE) {
+    statement.last_sql_state = "HY000";
+    statement.last_message = "result handle table exhausted";
+    return MDB_ERR_NO_MEMORY;
+  }
+
+  *out_result = handle;
+  return MDB_OK;
+}
+
 }  // namespace mdb
 
 extern "C" {
@@ -170,32 +249,14 @@ mdb_statement_handle mdb_statement_prepare(mdb_connection_handle connection,
     return MDB_INVALID_HANDLE;
   }
 
-  auto statement = std::unique_ptr<mdb::Statement>(new mdb::Statement());
-  statement->stmt = mysql_stmt_init(conn->mysql);
-  if (!statement->stmt) {
-    conn->capture_error();
+  mdb_statement_handle handle = MDB_INVALID_HANDLE;
+  std::string owned;
+  if (sql)
+    owned.assign(reinterpret_cast<const char *>(sql), sql_length);
+  if (mdb::prepare_statement_now(*conn, connection, owned, &handle) != MDB_OK)
     return MDB_INVALID_HANDLE;
-  }
 
-  if (mysql_stmt_prepare(statement->stmt,
-                         reinterpret_cast<const char *>(sql),
-                         static_cast<unsigned long>(sql_length)) != 0) {
-    statement->capture_error();
-    /* Also on the connection: the caller has no statement handle to ask. */
-    conn->last_errno = statement->last_errno;
-    conn->last_sql_state = statement->last_sql_state;
-    conn->last_message = statement->last_message;
-    mdb::set_global_error(statement->last_errno,
-                          statement->last_sql_state.c_str(),
-                          statement->last_message.c_str());
-    return MDB_INVALID_HANDLE;
-  }
-
-  statement->param_count =
-      static_cast<uint32_t>(mysql_stmt_param_count(statement->stmt));
-  statement->reset_bindings();
-
-  return mdb::statements().insert(std::move(statement));
+  return handle;
 
   MDB_GUARD_END(MDB_INVALID_HANDLE)
 }
@@ -303,47 +364,108 @@ int mdb_statement_execute(mdb_statement_handle statement,
   if (!found)
     return MDB_ERR_BAD_HANDLE;
 
-  found->last_errno = 0;
-  found->last_sql_state.clear();
-  found->last_message.clear();
+  mdb_result_handle produced = MDB_INVALID_HANDLE;
+  const int status = mdb::execute_statement_now(*found, &produced);
 
-  if (found->param_count > 0 &&
-      mysql_stmt_bind_param(found->stmt, found->binds.data()) != 0) {
-    found->capture_error();
-    return MDB_ERR_MYSQL;
-  }
+  if (status != MDB_OK)
+    return status;
 
-  if (mysql_stmt_execute(found->stmt) != 0) {
-    found->capture_error();
-    return MDB_ERR_MYSQL;
-  }
+  if (!produced)
+    return MDB_OK;
 
-  std::unique_ptr<mdb::Result> materialised =
-      mdb::materialise_statement_result(*found);
-
-  if (!materialised) {
-    /* No metadata means no result set, which is normal for INSERT and DDL.
-       An error during store/bind sets errno, which is how the two are told
-       apart. */
-    if (found->last_errno != 0)
-      return MDB_ERR_MYSQL;
+  if (!result) {
+    /* Caller does not want the rows; do not leak them. */
+    mdb_result_free(produced);
     return MDB_OK;
   }
 
-  if (!result)
-    return MDB_OK;  /* rows discarded; the Result destructor frees metadata */
-
-  uint32_t handle = mdb::results().insert(std::move(materialised));
-  if (handle == MDB_INVALID_HANDLE) {
-    found->last_sql_state = "HY000";
-    found->last_message = "result handle table exhausted";
-    return MDB_ERR_NO_MEMORY;
-  }
-
-  *result = handle;
+  *result = produced;
   return MDB_OK;
 
   MDB_GUARD_END(MDB_ERR_INTERNAL)
+}
+
+int mdb_statement_prepare_async(mdb_connection_handle connection,
+                                const uint8_t *sql,
+                                size_t sql_length) {
+  MDB_GUARD_BEGIN
+
+  mdb::Connection *conn = mdb::connections().get(connection);
+  if (!conn)
+    return MDB_ERR_BAD_HANDLE;
+  if (!sql && sql_length != 0)
+    return MDB_ERR_BAD_HANDLE;
+
+  return mdb::start_pending_call(connection, *conn, mdb::PendingKind::Prepare,
+                                 sql, sql_length, MDB_INVALID_HANDLE);
+
+  MDB_GUARD_END(MDB_ERR_INTERNAL)
+}
+
+int mdb_statement_prepare_poll(mdb_connection_handle connection,
+                               mdb_statement_handle *statement) {
+  MDB_GUARD_BEGIN
+
+  if (statement)
+    *statement = MDB_INVALID_HANDLE;
+
+  mdb::Connection *conn = mdb::connections().get(connection);
+  if (!conn)
+    return -MDB_ERR_BAD_HANDLE;
+
+  return mdb::poll_pending_call(*conn, mdb::PendingKind::Prepare, statement);
+
+  MDB_GUARD_END(-MDB_ERR_INTERNAL)
+}
+
+int mdb_statement_execute_async(mdb_statement_handle statement) {
+  MDB_GUARD_BEGIN
+
+  mdb::Statement *found = mdb::statements().get(statement);
+  if (!found)
+    return MDB_ERR_BAD_HANDLE;
+
+  /* Execution is serialised on the connection, not on the statement: two
+     statements prepared on one connection share a single MYSQL, so they
+     contend for the same pending slot. */
+  mdb::Connection *conn = mdb::connections().get(found->owner);
+  if (!conn) {
+    found->last_errno = 0;
+    found->last_sql_state = "HY000";
+    found->last_message = "the connection this statement was prepared on is closed";
+    return MDB_ERR_BAD_HANDLE;
+  }
+
+  return mdb::start_pending_call(found->owner, *conn, mdb::PendingKind::Execute,
+                                 nullptr, 0, statement);
+
+  MDB_GUARD_END(MDB_ERR_INTERNAL)
+}
+
+int mdb_statement_execute_poll(mdb_statement_handle statement,
+                               mdb_result_handle *result) {
+  MDB_GUARD_BEGIN
+
+  if (result)
+    *result = MDB_INVALID_HANDLE;
+
+  mdb::Statement *found = mdb::statements().get(statement);
+  if (!found)
+    return -MDB_ERR_BAD_HANDLE;
+
+  mdb::Connection *conn = mdb::connections().get(found->owner);
+  if (!conn)
+    return -MDB_ERR_BAD_HANDLE;
+
+  /* Guards against polling one statement for another's execution: both share
+     the connection's slot, so the handle has to match too. */
+  if (conn->pending.state.load(std::memory_order_acquire) != 0 &&
+      conn->pending.statement != statement)
+    return -MDB_ERR_BAD_STATE;
+
+  return mdb::poll_pending_call(*conn, mdb::PendingKind::Execute, result);
+
+  MDB_GUARD_END(-MDB_ERR_INTERNAL)
 }
 
 uint64_t mdb_statement_affected_rows(mdb_statement_handle statement) {

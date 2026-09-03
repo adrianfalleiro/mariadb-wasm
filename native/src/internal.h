@@ -13,6 +13,44 @@
 
 namespace mdb {
 
+/* Which server-side call a worker thread should run against a connection. */
+enum class PendingKind {
+  None = 0,
+  Query,      /* mysql_real_query + store               -> result handle    */
+  Prepare,    /* mysql_stmt_prepare                     -> statement handle */
+  Execute,    /* mysql_stmt_execute + store             -> result handle    */
+};
+
+/*
+  The one call a connection may have in flight, and its outcome.
+
+  Everything that reaches the server goes through this slot, rather than each
+  operation carrying its own state. That is what makes "one call at a time per
+  connection" structural: the MariaDB client API does not support concurrent
+  calls on a single MYSQL, and a query racing a prepared execute would corrupt
+  the protocol state rather than fail cleanly. With a single slot there is
+  nowhere for a second call to be recorded, so it is rejected instead.
+
+  The state transitions are split by thread so the flag needs no lock:
+  the caller moves 0 -> 1 before starting a worker, the worker moves 1 -> 2
+  when it finishes, and the caller moves 2 -> 0 when it collects the result.
+  Only the caller's thread ever starts a call, so testing and setting it there
+  cannot race.
+*/
+struct PendingCall {
+  std::atomic<int> state{0};   /* 0 idle, 1 running, 2 finished uncollected */
+
+  PendingKind kind = PendingKind::None;
+  int status = MDB_OK;
+
+  /* Query and execute produce a result handle, prepare a statement handle.
+     One field, because only one of them can be in flight. */
+  uint32_t produced = MDB_INVALID_HANDLE;
+
+  std::string sql;                                      /* query, prepare */
+  mdb_statement_handle statement = MDB_INVALID_HANDLE;  /* execute        */
+};
+
 /* A connection plus room to stage its last error. mysql_error() returns a
    pointer into the MYSQL struct that the next call overwrites, so the strings
    are copied here before being handed out through mdb_error. */
@@ -23,22 +61,14 @@ struct Connection {
   std::string last_message;
 
   /*
-    Async execution state.
-
     Two connections cannot contend for a row lock while both are driven from
     one JavaScript thread: the first blocking call owns the thread, so the
-    other transaction can never reach its COMMIT. Running a query on its own
-    thread is what makes real concurrency - and therefore deadlock detection,
-    and lock waits that resolve rather than time out - expressible at all.
-
-    One query at a time per connection. The MariaDB client API does not
-    support concurrent calls on a single connection, and pretending otherwise
-    would corrupt the protocol state rather than fail cleanly.
+    other transaction can never reach its COMMIT. Running server calls on
+    their own thread is what makes real concurrency - and therefore deadlock
+    detection, and lock waits that resolve rather than time out - expressible
+    at all.
   */
-  std::atomic<int> async_state{0};   /* 0 idle, 1 running, 2 finished */
-  int async_status = MDB_OK;
-  mdb_result_handle async_result = 0;
-  std::string async_sql;
+  PendingCall pending;
 
   ~Connection();
 
@@ -89,6 +119,12 @@ struct Result {
 struct Statement {
   MYSQL_STMT *stmt = nullptr;
   uint32_t param_count = 0;
+
+  /* The connection this was prepared on. Held as a handle rather than a
+     pointer so that a statement outliving its connection is a lookup miss
+     instead of a dangling read, and so the async paths can find the pending
+     slot that serialises everything running against that connection. */
+  mdb_connection_handle owner = MDB_INVALID_HANDLE;
   std::vector<MYSQL_BIND> binds;
   std::vector<std::vector<char>> buffers;
   std::vector<unsigned long> lengths;
@@ -113,6 +149,57 @@ HandleTable<Statement> &statements();
    fails; a statement that legitimately returns no rows yields nullptr with no
    error recorded, so callers must check the statement's errno. */
 std::unique_ptr<Result> materialise_statement_result(Statement &statement);
+
+/*
+  The bodies behind the statement half of the ABI, factored out so the
+  synchronous entry points and the worker thread run byte-identical code. A
+  divergence between the two would be invisible to the differential suite,
+  which drives the synchronous ABI natively and the asynchronous one under
+  wasm.
+
+  Both report failure through the same channel the synchronous ABI uses: the
+  statement's captured error for execute, the connection's for prepare.
+*/
+int prepare_statement_now(Connection &connection,
+                          mdb_connection_handle connection_handle,
+                          const std::string &sql,
+                          mdb_statement_handle *out_statement);
+
+int execute_statement_now(Statement &statement, mdb_result_handle *out_result);
+
+/*
+  Stages a call in the connection's pending slot and starts a worker for it.
+
+  Reserving and staging happen together, in that order, because the slot is
+  only safe to write while no worker is reading it. Splitting them would leave
+  a window in which a second caller overwrites the SQL an in-flight worker is
+  still executing.
+
+  Everything written here happens before pthread_create, so it is visible to
+  the new thread without further synchronisation.
+
+  Returns MDB_ERR_BAD_STATE if a call is already in flight, or if one has
+  finished and its result has not been collected. `sql` is ignored for
+  Execute, `statement` for Query and Prepare.
+*/
+int start_pending_call(mdb_connection_handle connection_handle,
+                       Connection &connection,
+                       PendingKind kind,
+                       const uint8_t *sql,
+                       size_t sql_length,
+                       mdb_statement_handle statement);
+
+/*
+  Shared poll: 0 still running, 1 finished (handle in *out_produced),
+  negative -mdb_status. Collecting a finished call frees the slot for the next
+  one, so a caller that never polls leaves the connection busy.
+
+  `expected` guards against polling for the wrong operation - asking for a
+  prepared-statement result while a plain query is in flight is a caller bug,
+  not something to answer with another operation's handle.
+*/
+int poll_pending_call(Connection &connection, PendingKind expected,
+                      uint32_t *out_produced);
 
 bool runtime_ready();
 void set_runtime_ready(bool ready);

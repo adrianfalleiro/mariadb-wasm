@@ -252,6 +252,23 @@ void *async_init_entry(void *raw) {
     result = MDB_ERR_INTERNAL;
   }
 
+  /*
+    This is the thread that used to make shutdown cost a flat five seconds.
+
+    mysql_server_init registers its calling thread with mysys - my_thread_init
+    increments THR_thread_count - and every registered thread has to call
+    my_thread_end before exiting. Natively that is invisible, because init runs
+    on the thread that later calls mysql_server_end, and my_end unregisters it.
+    Here init runs on its own thread, which then exits without unregistering,
+    so the count never reaches zero and my_thread_global_end waits out its full
+    my_thread_end_wait_time before giving up with "1 threads didn't exit".
+
+    Ending before publishing completion rather than after: once the poller sees
+    state 2 it may start connecting, and there is no reason to leave the
+    registration briefly live while it does.
+  */
+  mysql_thread_end();
+
   g_init_result.store(result, std::memory_order_relaxed);
   /* Release so a poller that observes state 2 also sees the result. */
   g_init_state.store(2, std::memory_order_release);

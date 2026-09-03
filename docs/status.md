@@ -21,7 +21,7 @@ Running log. Newest entries at the bottom of each section.
 | 12 — worker ownership | done | Direct and inside `worker_threads`; both green, public API unchanged |
 | 13 — differential suite | done | 97 statements across 14 cases agree, with a negative control |
 | 14 — runner integration | done | Four concurrent servers isolated; helpers added |
-| 15 — performance | partial | Shutdown fixed (45×); plugin trimming not done — `docs/performance.md` |
+| 15 — performance | partial | Shutdown fixed properly (23–45×, thread identified); plugin trimming not done, and the async statement path costs parameterised throughput — `docs/performance.md` |
 | 16 — CI | **portable, still unverified** | The macOS assumptions are gone — `scripts/lib/platform.sh` selects compiler, link libraries and SDK flags per host, and both branches are exercised. The workflow has still never executed |
 
 ## Remaining gaps
@@ -41,13 +41,18 @@ Honest list of what an acceptance review would still find:
   READ vs READ COMMITTED, and four concurrent writers all pass under wasm —
   see `package/test/concurrency.test.ts`. The differential runner is
   single-connection, so none of it is compared byte-for-byte against native.
-- **One MariaDB thread never exits** at shutdown. Worked around by skipping
-  the wait; the thread has not been identified.
+- ~~One MariaDB thread never exits at shutdown.~~ **Closed.** It was the
+  thread running `mdb_runtime_init_async`: `mysql_server_init` registers its
+  caller with mysys, and that thread exited without calling `my_thread_end`.
+  It now does, `THR_thread_count` reaches zero, and MariaDB's default wait is
+  back in place instead of being forced to 0. See the failure log below.
 - ~~Blocking ABI calls exposed to the filesystem-proxying deadlock.~~
-  **Closed.** Queries now run on their own thread and the package polls from
-  the event loop, so the main thread stays free. Prepared statements still
-  execute synchronously — they have shown no problem, but they are the
-  remaining call that blocks.
+  **Closed.** Query, prepare and execute all run on a worker thread with the
+  package polling from the event loop, so nothing that reaches MariaDB runs on
+  the thread that owns the filesystem. The cost is real and measured:
+  parameterised statements went from ~43 µs to ~215 µs per call, because each
+  now makes two threaded round trips instead of two blocking ones. See
+  `docs/performance.md` for the two ways to get it back.
 - **Memory is not returned on close.** Closing four instances gives back only
   ~85 MB of 1.2 GB. Per-instance cost is down 53% (see `docs/performance.md`),
   but a long-lived runner creating and destroying many servers will still
@@ -64,16 +69,19 @@ Honest list of what an acceptance review would still find:
 
 ## Verified behaviour (wasm)
 
-`node tests/wasm/smoke.mjs` — 22 assertions, all passing, in ~0.5s wall
-clock, 25/25 consecutive runs (plus 10/10 inside a `worker_threads` worker):
+`node tests/wasm/smoke.mjs` — 37 assertions, all passing, in ~0.5s wall
+clock, 15/15 consecutive runs (plus 10/10 inside a `worker_threads` worker):
 
 `SELECT 1`, `CREATE DATABASE`, `CREATE TABLE ... ENGINE=InnoDB` (engine
 confirmed via `information_schema`), `INSERT`, exact `DECIMAL(20,4)`,
 `VARBINARY` with an embedded NUL, `DATETIME(6)` microseconds,
 `START TRANSACTION` / `ROLLBACK` restoring the prior value,
 `START TRANSACTION` / `COMMIT` persisting it, duplicate key as `1062`/`23000`,
-`mysql_server_end`, and Node exiting on its own with status 0 — no leftover
-pthread worker holding the event loop open (criterion 3.2.9).
+prepared statements through both the synchronous and the threaded ABI with
+identical values, a second call on a busy connection refused with
+`MDB_ERR_BAD_STATE`, `mysql_server_end` with MariaDB's thread wait left at its
+default and no straggler reported, and Node exiting on its own with status 0 —
+no leftover pthread worker holding the event loop open (criterion 3.2.9).
 
 So the milestone in §29 of the brief is reached: *real MariaDB embedded server
 with InnoDB executing inside WebAssembly*.
@@ -241,6 +249,54 @@ background threads do I/O has the same exposure. Initialisation is the worst
 case by far, and queries have been stable in every run so far, but the durable
 answer is the Phase 12 topology: run every MariaDB call on a dedicated thread
 and never block the thread that owns the filesystem.
+
+### 2026-08-15 — RESOLVED: the thread that never exited at shutdown
+
+```
+Date:        2026-08-15
+Phase:       15 (performance) / 9 (init under wasm)
+Command:     node tests/wasm/smoke.mjs, with the shutdown wait left at default
+Symptom:     Every shutdown cost a flat ~5.1s and MariaDB printed
+             "Error in my_thread_global_end(): 1 threads didn't exit".
+             Worked around since Phase 15 by forcing the wait to 0.
+Subsystem:   mysys thread registration
+Category:    THREADING
+```
+
+**Isolating it.** The count is exactly 1, and a scenario that only initialises
+and shuts down — no connection, no query — reports the same 1. That rules out
+the query path and points at initialisation. The async query worker was already
+pairing `mysql_thread_init` with `mysql_thread_end`, and adding a query to the
+scenario did not add a second straggler, which confirms the pairing works and
+that the leak predates any query.
+
+**Root cause.** `my_thread_init` increments `THR_thread_count`, `my_thread_end`
+decrements it, and `my_thread_global_end` waits for zero. `mysql_server_init`
+registers *its calling thread* — the registration is implicit, not from an
+explicit `mysql_thread_init`, which is why it was easy to miss. Under wasm that
+call happens on the dedicated thread from `mdb_runtime_init_async`, which
+returned and exited without ever unregistering.
+
+Natively the same code leaks nothing: init runs on the thread that later calls
+`mysql_server_end`, and `my_end` unregisters it there. The bug existed only in
+the build where init was moved off the main thread — which was itself the fix
+for the startup deadlock above.
+
+```
+Correction:  mysql_thread_end() at the end of async_init_entry, before the
+             completion state is published. my_thread_end is guarded on the
+             thread actually being registered, so it is a no-op on the path
+             where mysql_server_init failed.
+Semantics:   None. The wait is now left at MariaDB's default rather than
+             forced to 0, so shutdown establishes that nothing is still
+             running instead of merely declining to check.
+Test:        tests/wasm/smoke.mjs asserts no "threads didn't exit" and that
+             shutdown stays under 2.5s; package/test/shutdown.test.ts asserts
+             the same through the TypeScript API, including after the async
+             statement path has been exercised.
+Measured:    shutdown 5216ms -> 110-220ms, with the wait enabled in both the
+             before and after case.
+```
 
 ---
 

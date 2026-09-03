@@ -106,9 +106,36 @@ Emscripten would otherwise tear the runtime down the moment control returns to
 the event loop.
 
 The same exposure exists for any call that blocks while background threads do
-I/O. Initialisation is much the worst case and queries have been stable across
-every run, but the durable answer is to move all MariaDB calls onto a dedicated
-thread. See `docs/status.md`.
+I/O, so every ABI call that reaches the server now takes that route:
+`mdb_connection_query_async`, `mdb_statement_prepare_async` and
+`mdb_statement_execute_async`, each with a matching poll. Nothing that touches
+MariaDB runs on the thread that owns the filesystem.
+
+The three share one pending slot per connection, because they all run against
+one `MYSQL` and the client API does not support concurrent calls on it. A
+second submission while one is in flight is refused with `MDB_ERR_BAD_STATE`
+rather than corrupting the protocol state. That the slot is per *connection*
+and not per statement is the part worth remembering: two statements prepared on
+the same connection contend with each other.
+
+The bind calls stay synchronous. They only copy into the statement's own
+buffers and never reach the server, so there is nothing for them to block on —
+but they must all be issued before the execute is submitted, since the worker
+thread reads those buffers.
+
+### Every thread must unregister
+
+A thread that calls into the client API is registered with mysys, and one that
+exits without calling `my_thread_end` is never unregistered:
+`my_thread_global_end` then waits `my_thread_end_wait_time` seconds at shutdown
+for a count that will never reach zero, and gives up with
+`N threads didn't exit`.
+
+`mysql_server_init` registers *its caller*, which is why the initialisation
+thread counted — it is the one case where the registration is implicit rather
+than from an explicit `mysql_thread_init`. Every worker this wrapper starts now
+pairs the two, and `tests/wasm/smoke.mjs` fails if MariaDB ever reports a
+straggler again.
 
 ## Filesystem design
 

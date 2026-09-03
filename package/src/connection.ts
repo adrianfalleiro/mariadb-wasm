@@ -62,7 +62,7 @@ export class Connection implements EmbeddedMariaDbConnection {
        statement protocol rejects, so preparing unconditionally would narrow
        what query() can run. */
     if (!parameters || parameters.length === 0) return await this.#runText(sql);
-    return this.#runPrepared(sql, parameters);
+    return await this.#runPrepared(sql, parameters);
   }
 
   async #runText(sql: string): Promise<QueryResult> {
@@ -86,8 +86,14 @@ export class Connection implements EmbeddedMariaDbConnection {
     }
   }
 
-  #runPrepared(sql: string, parameters: readonly unknown[]): QueryResult {
-    const statement = this.#runtime.statementPrepare(this.#handle, sql);
+  async #runPrepared(
+    sql: string,
+    parameters: readonly unknown[],
+  ): Promise<QueryResult> {
+    const statement = await this.#runtime.statementPrepareAsync(
+      this.#handle,
+      sql,
+    );
 
     try {
       const expected = this.#runtime.statementParamCount(statement);
@@ -116,7 +122,7 @@ export class Connection implements EmbeddedMariaDbConnection {
         }
       });
 
-      const resultHandle = this.#runtime.statementExecute(statement);
+      const resultHandle = await this.#runtime.statementExecuteAsync(statement);
 
       const affectedRows = this.#runtime.statementAffectedRows(statement);
       const insertId = BigInt(this.#runtime.statementInsertId(statement));

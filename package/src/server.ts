@@ -235,6 +235,16 @@ class Server implements EmbeddedMariaDbServer {
     };
   }
 
+  /*
+    False if MariaDB gave up waiting for its own threads during close(),
+    which means one of them never called my_thread_end. Exposed rather than
+    merely logged because the symptom otherwise is just a slow shutdown, and a
+    flat five seconds per server is easy to mistake for "wasm is slow".
+  */
+  get shutdownWasClean(): boolean {
+    return this.#runtime.shutdownIsClean();
+  }
+
   get diagnostics(): string {
     return this.#runtime.diagnostics();
   }

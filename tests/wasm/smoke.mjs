@@ -373,6 +373,106 @@ expectScalar(conn, "SELECT balance FROM users WHERE id=1", "55.0000",
   }
 }
 
+/*
+  The same thing through the non-blocking statement ABI.
+
+  Kept alongside the synchronous block rather than replacing it: the two paths
+  must agree, and the synchronous one is what the native reference and the
+  differential runner drive. This is the wasm-only half — prepare and execute
+  each run on their own thread so the main thread stays free to service
+  MariaDB's proxied filesystem syscalls.
+*/
+{
+  const sql = "INSERT INTO users(email, balance, payload, created_at)" +
+    " VALUES (?, ?, ?, ?)";
+  const sqlBytes = new TextEncoder().encode(sql);
+  const sqlPtr = _malloc(sqlBytes.length);
+  u8().set(sqlBytes, sqlPtr);
+
+  const submitted = call("mdb_statement_prepare_async", "number",
+    ["number", "number", "number"], [conn, sqlPtr, sqlBytes.length]);
+
+  /* Submitting a second call while one is in flight must be refused rather
+     than corrupting the protocol state on the shared MYSQL. */
+  const second = call("mdb_statement_prepare_async", "number",
+    ["number", "number", "number"], [conn, sqlPtr, sqlBytes.length]);
+  if (second !== MDB_ERR_BAD_STATE)
+    fail(`a second in-flight call should be refused, got ${second}`);
+  else ok("a second call on a busy connection is refused");
+
+  _free(sqlPtr);
+
+  let stmt = 0;
+  if (submitted !== MDB_OK) fail("mdb_statement_prepare_async");
+  else {
+    const outPtr = _malloc(4);
+    u32()[outPtr >> 2] = 0;
+    for (;;) {
+      const poll = call("mdb_statement_prepare_poll", "number",
+        ["number", "number"], [conn, outPtr]);
+      if (poll === 1) { stmt = u32()[outPtr >> 2]; break; }
+      if (poll < 0) { fail(`mdb_statement_prepare_poll -> ${poll}`); break; }
+      await new Promise((resolve) => setImmediate(resolve));
+    }
+    _free(outPtr);
+  }
+
+  if (!stmt) fail("mdb_statement_prepare_async produced no statement");
+  else {
+    ok("mdb_statement_prepare_async");
+
+    const bindText = (index, text, fn = "mdb_statement_bind_string") => {
+      const bytes = new TextEncoder().encode(text);
+      const ptr = _malloc(bytes.length);
+      u8().set(bytes, ptr);
+      call(fn, "number", ["number", "number", "number", "number"],
+        [stmt, index, ptr, bytes.length]);
+      _free(ptr);
+    };
+
+    bindText(0, "e@example.com");
+    bindText(1, "13579.2468");
+    {
+      const blob = new Uint8Array([0xff, 0x00, 0x10]);
+      const ptr = _malloc(blob.length);
+      u8().set(blob, ptr);
+      call("mdb_statement_bind_blob", "number",
+        ["number", "number", "number", "number"], [stmt, 2, ptr, blob.length]);
+      _free(ptr);
+    }
+    bindText(3, "2026-07-08 09:10:11.121314");
+
+    if (call("mdb_statement_execute_async", "number", ["number"], [stmt])
+        !== MDB_OK) {
+      fail("mdb_statement_execute_async");
+    } else {
+      const outPtr = _malloc(4);
+      u32()[outPtr >> 2] = 0;
+      let done = false;
+      for (;;) {
+        const poll = call("mdb_statement_execute_poll", "number",
+          ["number", "number"], [stmt, outPtr]);
+        if (poll === 1) { done = true; break; }
+        if (poll < 0) { fail(`mdb_statement_execute_poll -> ${poll}`); break; }
+        await new Promise((resolve) => setImmediate(resolve));
+      }
+      const produced = u32()[outPtr >> 2];
+      if (produced) call("mdb_result_free", null, ["number"], [produced]);
+      _free(outPtr);
+      if (done) ok("mdb_statement_execute_async (bound INSERT)");
+    }
+
+    call("mdb_statement_close", "number", ["number"], [stmt]);
+  }
+}
+
+expectScalar(conn, "SELECT balance FROM users WHERE email='e@example.com'",
+  "13579.2468", "async-bound DECIMAL stored exactly");
+expectScalar(conn, "SELECT HEX(payload) FROM users WHERE email='e@example.com'",
+  "FF0010", "async-bound binary parameter survived");
+expectScalar(conn, "SELECT created_at FROM users WHERE email='e@example.com'",
+  "2026-07-08 09:10:11.121314", "async-bound DATETIME(6) kept microseconds");
+
 expectScalar(conn, "SELECT balance FROM users WHERE email='d@example.com'",
   "98765.4321", "bound DECIMAL stored exactly");
 expectScalar(conn, "SELECT HEX(payload) FROM users WHERE email='d@example.com'",
@@ -388,9 +488,27 @@ if (call("mdb_connection_close", "number", ["number"], [conn]) !== MDB_OK)
   fail("mdb_connection_close");
 else ok("mdb_connection_close");
 
+/*
+  Shut down with MariaDB's real thread wait in place — this test never calls
+  mdb_runtime_set_shutdown_wait_seconds. Every thread the wrapper starts pairs
+  mysql_thread_init with mysql_thread_end, so the count reaches zero and the
+  wait returns immediately. If one does not, my_thread_global_end burns its
+  full five seconds and says so on stderr, which is the only place it reports.
+*/
+const shutdownStarted = Date.now();
 if (call("mdb_runtime_shutdown", "number", []) !== MDB_OK)
   fail("mdb_runtime_shutdown");
 else ok("mdb_runtime_shutdown");
+const shutdownMs = Date.now() - shutdownStarted;
+
+if (stderrLines.some((line) => line.includes("threads didn't exit")))
+  fail("a MariaDB thread never called my_thread_end");
+else ok("every MariaDB thread exited at shutdown");
+
+/* Well under the flat 5s the leak used to cost, well over a clean shutdown. */
+if (shutdownMs >= 2500)
+  fail(`shutdown took ${shutdownMs}ms — the thread wait ran to completion`);
+else ok(`shutdown did not wait on threads (${shutdownMs}ms)`);
 
 console.log(`\n${failures ? "FAILED" : "PASSED"} (${failures} failure${failures === 1 ? "" : "s"})`);
 

@@ -9,22 +9,22 @@ one machine, not a benchmark claim.
 | `mariadb.wasm` | 12.1 MB |
 | `mariadb.mjs` | 0.13 MB |
 | server create (module load + MariaDB init) | ~180 ms |
-| first connection | 0.5 ms |
-| first query | ~11 ms |
-| 1000 × `SELECT 1` | ~30–80 ms, run to run (async path) |
-| 1000 prepared inserts (autocommit) | ~43 ms |
-| 1000 inserts in one transaction | ~23 ms |
+| first connection | 0.1 ms |
+| first query | ~6 ms |
+| 1000 × `SELECT 1` | ~35 ms |
+| 1000 prepared inserts (autocommit) | ~215 ms (was ~43 ms — see below) |
+| 1000 inserts in one transaction | ~50 ms (was ~23 ms) |
 | read 2000 rows | ~7 ms |
-| 1000 indexed point lookups | ~26 ms |
-| connection close | 0.2 ms |
-| **server close** | **~114 ms** (was 5119 ms) |
-| full package suite (25 tests) | **3.1 s** (was 42.8 s) |
+| 1000 indexed point lookups | ~60 ms (was ~26 ms) |
+| connection close | 0.1 ms |
+| **server close** | **~110–220 ms** (was 5119 ms) |
+| full package suite (43 tests) | **3.9 s** (was 42.8 s) |
 
-## A deliberate cost: queries run on their own thread
+## A deliberate cost: everything that reaches the server runs on its own thread
 
-Every query goes through `mdb_connection_query_async` and is polled from the
-event loop, which measures ~77 µs per round trip against ~20 µs for the
-synchronous call. That is paid on purpose.
+Every call that reaches MariaDB — query, prepare, execute — is submitted to a
+worker thread and polled from the event loop. A query round trip measures
+~77 µs that way against ~20 µs synchronous. That is paid on purpose.
 
 A blocking call owns the JavaScript thread. Two connections contending for a
 row lock could therefore never resolve — the holder cannot reach its COMMIT
@@ -36,10 +36,33 @@ coin flip.
 `setImmediate`, not `setTimeout`: Node clamps even `setTimeout(0)` to about a
 millisecond, which measured **1156 ms** for the same 1000 queries against 77 ms.
 
-## The one optimisation made so far
+### What that cost is, for prepared statements
 
-Shutdown. It was 5.1 seconds, flat, and dwarfed everything else — a suite with
-a server per file paid it once per file.
+Prepared statements pay it twice. `execute()` with parameters prepares a fresh
+statement, executes it, and closes it, so a call that used to be two blocking
+round trips is now two threaded ones: ~215 µs against ~43 µs, and the same
+factor shows up in point lookups and in transactional inserts.
+
+That is a real regression on parameterised throughput and it is worth being
+plain about. It buys the thing the row-locking tests in
+`package/test/concurrency.test.ts` now demonstrate through `execute()` rather
+than only through `query()` — two connections genuinely contending on
+parameterised SQL, which is what most callers actually write.
+
+The obvious way to get it back is a **persistent worker per connection** taking
+work from a queue, instead of a fresh `pthread_create` per call. That would
+help the plain query path by the same mechanism, and it is the only reason a
+call costs tens of microseconds rather than a few. Not done, and not required
+by anything yet.
+
+A statement cache keyed on SQL text would remove the prepare round trip
+entirely for repeated statements. It is the larger win of the two and the
+larger change, since it has to decide when a cached statement is stale.
+
+## Shutdown
+
+It was 5.1 seconds, flat, and dwarfed everything else — a suite with a server
+per file paid it once per file.
 
 It was not InnoDB: `innodb-fast-shutdown` 0, 1 and 2 all measured 5.1 s.
 Splitting `close()` showed `mysql_server_end` taking all of it and thread
@@ -51,12 +74,28 @@ Error in my_thread_global_end(): 1 threads didn't exit
 ```
 
 `my_thread_global_end` waits `my_thread_end_wait_time` seconds — default 5 —
-for `THR_thread_count` to reach zero. Under wasm exactly one
-MariaDB-registered thread never calls `my_thread_end`, so the wait always runs
-to completion. **Which thread that is has not been identified**, and finding it
-is the honest fix; setting the wait to 0 is the pragmatic one, sound here only
-because every Emscripten worker is terminated immediately afterwards and the
-instance is discarded.
+for `THR_thread_count` to reach zero.
+
+**The thread was the one running `mdb_runtime_init_async`.** `mysql_server_init`
+registers its calling thread with mysys via `my_thread_init`, and that thread
+then exited without calling `my_thread_end`, so the count never reached zero.
+Natively the same code is invisible: init runs on the thread that later calls
+`mysql_server_end`, and `my_end` unregisters it there. Only the wasm build
+moves init onto a thread of its own, which is what turned an implicit
+registration into a leak.
+
+Ending the thread properly costs nothing measurable — shutdown is ~110–220 ms
+with the wait enabled, the same bimodal spread it had with the wait skipped, so
+the wait itself is not on the critical path once the count reaches zero. The
+workaround of forcing the wait to 0 has been removed, and MariaDB's default is
+back in place: a shutdown that waits is the one that establishes there is
+nothing still running, which matters because MariaDB deliberately skips
+destroying its global mutexes when the wait times out.
+
+`mdb_runtime_set_shutdown_wait_seconds` is kept so the wait can still be
+bounded, and `tests/wasm/smoke.mjs` plus `package/test/shutdown.test.ts` fail if
+a straggler ever comes back — otherwise the symptom is just five silent seconds
+that read as "wasm is slow".
 
 ## Not yet done, in the brief's order
 

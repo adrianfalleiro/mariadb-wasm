@@ -30,8 +30,9 @@ await connection.close();
 await server.close();
 ```
 
-Roughly 175 ms to start a server, 0.5 ms to connect, ~43 ms for a thousand
-queries, ~107 ms to shut down.
+Roughly 180 ms to start a server, 0.1 ms to connect, ~35 ms for a thousand
+queries, ~110–220 ms to shut down. Parameterised statements cost more than
+plain ones — see `docs/performance.md`.
 
 ## What it is
 
@@ -62,15 +63,16 @@ Working, with real gaps. All five suites pass:
 |---|---|
 | `11-run-native-smoke.sh` | 22 assertions, `libmariadbd` direct |
 | `12-run-abi-smoke.sh` | 63 assertions, the C ABI natively |
-| `tests/wasm/smoke.mjs` | 32 assertions under wasm |
+| `tests/wasm/smoke.mjs` | 37 assertions under wasm |
 | `06-build-datadir-template.sh` | 132 bootstrap statements, 0 failures |
 | `13-run-differential.sh` | 97 statements, native vs wasm, with a negative control |
-| `package/test` | 38 tests, 3.5 s — including InnoDB locking under real concurrency |
+| `package/test` | 43 tests, 3.9 s — including InnoDB locking under real concurrency |
 
-Concurrency is real: queries run on their own thread, so two connections
-genuinely contend. Lock waits resolve when the holder commits, time out with
-`1205` when it does not, and a deadlock produces `1213`/`40001` with exactly
-one victim.
+Concurrency is real: every call that reaches the server — query, prepare,
+execute — runs on its own thread, so two connections genuinely contend, through
+parameterised SQL as much as through text. Lock waits resolve when the holder
+commits, time out with `1205` when it does not, and a deadlock produces
+`1213`/`40001` with exactly one victim.
 
 Stored routines, functions, triggers and views work: a 620 KB datadir template
 carrying the `mysql.*` system tables is cloned into each instance
