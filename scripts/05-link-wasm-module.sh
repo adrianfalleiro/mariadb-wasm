@@ -10,11 +10,25 @@
 set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
+source "$ROOT/scripts/lib/platform.sh"
 source "$ROOT/emsdk/emsdk_env.sh" >/dev/null 2>&1
 
 BUILD="$ROOT/build/wasm"
+tpool_link_args "$BUILD"
 PROFILE="${1:-release}"
+TARGET="${2:-node}"
 OUT="${MARIADB_WASM_DIST:-$ROOT/dist}"
+TARGET_FLAGS=(-sENVIRONMENT=node)
+if [ "$TARGET" = browser ]; then
+  OUT="$OUT/browser"
+  TARGET_FLAGS=(-sENVIRONMENT=web,worker
+    --embed-file "$ROOT/dist/share@/mariadb/share"
+    --embed-file "$ROOT/dist/charsets@/mariadb/charsets"
+    --embed-file "$ROOT/dist/datadir-template@/mariadb/template")
+elif [ "$TARGET" != node ]; then
+  echo "unknown target: $TARGET" >&2
+  exit 1
+fi
 LIB="$BUILD/libmysqld/libmariadbd.a"
 
 if [ ! -f "$LIB" ]; then
@@ -52,36 +66,13 @@ RUNTIME_METHODS='["ccall","cwrap","HEAPU8","HEAPU32","UTF8ToString","stringToUTF
 # the event loop (see mdb_runtime_init_async), so the runtime has to outlive
 # it. Node still exits on its own once the pthread workers are gone.
 #
-# PTHREAD_POOL_SIZE is a memory-versus-startup trade, measured rather than
-# guessed. Each pooled worker is a Node worker_thread with its own V8 isolate,
-# costing roughly 25 MB of RSS whether or not it is ever used; MariaDB needs
-# about 11 threads to start, and any beyond the pool are created on demand,
-# which costs an event-loop round trip each.
+# Prewarm four workers; additional workers start asynchronously on demand.
+# Each worker has a V8 isolate, so preallocating for peak concurrency wastes
+# memory in the common single-connection CI case. Never fail on pool exhaustion.
 #
-#   pool=4   305 MB RSS, 990 ms to create a server
-#   pool=8   344 MB RSS, 260 ms
-#   pool=16  592 MB RSS, 175 ms
-#
-# 8 takes nearly all of the memory saving for a fraction of the startup cost.
-# Query throughput is unaffected at every size. Memory matters more here
-# because test runners run several instances at once.
-#
-# STRICT is 0, not 2. It was 2 while the startup deadlock was being chased, to
-# turn pool exhaustion into a visible error rather than a silent hang. That is
-# now the wrong trade: every call that could exhaust the pool returns to the
-# event loop first, so Emscripten can spawn another worker on demand, and
-# aborting instead would turn a survivable moment of load into a crash.
-#
-# Memory is set explicitly, not left to defaults. MariaDB's static data alone
-# is ~19.8 MB, over Emscripten's 16 MB default, so the link fails outright
-# without this.
-#
-# 160 MB covers static data plus a 16 MB buffer pool with room to spare. It
-# was briefly 512 MB while the startup deadlock was being chased, on the
-# theory that heap growth was racing thread startup; that turned out to be
-# wrong (the real cause was filesystem proxying - see docs/status.md), and
-# carrying 512 MB per instance would have cost 2 GB for the four-instance
-# isolation test. Verified at 15/15 runs after the real fix.
+# Use 512 KiB per pthread (above MariaDB's default ~300 KiB thread stack),
+# instead of inheriting the filesystem owner's 4 MiB stack. Keep heap growth
+# enabled for larger fixtures: 96 MiB is the initial allocation, not a limit.
 case "$PROFILE" in
   release)
     PROFILE_FLAGS=(-O2 -sASSERTIONS=0)
@@ -110,18 +101,19 @@ em++ -std=c++17 \
   "$ROOT/native/src/result.cc" \
   "$ROOT/native/src/statement.cc" \
   "$LIB" \
-  "$BUILD/tpool/libtpool.a" \
-  -sENVIRONMENT=node \
+  ${TPOOL_LINK_ARGS[@]+"${TPOOL_LINK_ARGS[@]}"} \
+  "${TARGET_FLAGS[@]}" \
   -sMODULARIZE=1 \
   -sEXPORT_ES6=1 \
   -sALLOW_MEMORY_GROWTH=1 \
-  -sINITIAL_MEMORY=160MB \
+  -sINITIAL_MEMORY=96MB \
   -sMAXIMUM_MEMORY=2GB \
-  -sPTHREAD_POOL_SIZE=8 \
+  -sPTHREAD_POOL_SIZE=4 \
   -sPTHREAD_POOL_SIZE_STRICT=0 \
   -sEXIT_RUNTIME=0 \
   -sFORCE_FILESYSTEM=1 \
   -sSTACK_SIZE=4MB \
+  -sDEFAULT_PTHREAD_STACK_SIZE=512KB \
   -sEXPORTED_FUNCTIONS="$EXPORTS" \
   -sEXPORTED_RUNTIME_METHODS="$RUNTIME_METHODS" \
   -lnodefs.js \

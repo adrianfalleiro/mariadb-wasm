@@ -5,6 +5,9 @@
 #include <mysql.h>
 
 #include <atomic>
+#include <condition_variable>
+#include <mutex>
+#include <pthread.h>
 #include <string>
 #include <vector>
 
@@ -69,6 +72,14 @@ struct Connection {
     at all.
   */
   PendingCall pending;
+
+  // A connection serializes calls on one reusable execution thread. Repeated
+  // calls reuse the pthread instead of repeatedly creating and detaching one.
+  std::mutex work_mutex;
+  std::condition_variable work_ready;
+  pthread_t worker{};
+  bool worker_started = false;
+  bool stop_worker = false;
 
   ~Connection();
 
@@ -168,15 +179,15 @@ int prepare_statement_now(Connection &connection,
 int execute_statement_now(Statement &statement, mdb_result_handle *out_result);
 
 /*
-  Stages a call in the connection's pending slot and starts a worker for it.
+  Stages a call in the connection's pending slot and wakes its reusable worker.
 
   Reserving and staging happen together, in that order, because the slot is
   only safe to write while no worker is reading it. Splitting them would leave
   a window in which a second caller overwrites the SQL an in-flight worker is
   still executing.
 
-  Everything written here happens before pthread_create, so it is visible to
-  the new thread without further synchronisation.
+  The mutex and release/acquire state transition publish the pending payload
+  before the worker reads it. The worker is created lazily on the first call.
 
   Returns MDB_ERR_BAD_STATE if a call is already in flight, or if one has
   finished and its result has not been collected. `sql` is ignored for

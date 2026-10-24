@@ -241,4 +241,91 @@ path.write_text(text)
 print("applied: pcre2 toolchain forwarding")
 PY
 
+# ---------------------------------------------------------------------------
+# 7. Size the WASM background pool for proxied I/O, not host CPU count.
+#
+# This changes the scheduling/creation heuristic, NOT the maximum pool size.
+# Its deadlock-avoidance timer can still create more workers when needed.
+python3 - "$SRC/tpool/tpool_generic.cc" <<'PYPOOL'
+import pathlib, sys
+path = pathlib.Path(sys.argv[1])
+text = path.read_text()
+old = """  if (concurrency == 0)
+    concurrency= 2 * std::thread::hardware_concurrency();"""
+new = """  if (concurrency == 0)
+#ifdef __EMSCRIPTEN__
+    // MEMFS I/O is proxied through one owner; CPU-count sizing overproduces workers.
+    concurrency= 1;
+#else
+    concurrency= 2 * std::thread::hardware_concurrency();
+#endif"""
+if new in text:
+    print("already applied: WASM background pool concurrency")
+elif old not in text:
+    sys.exit("PATCH FAILED - anchor not found: tpool default concurrency")
+else:
+    path.write_text(text.replace(old, new, 1))
+    print("applied: WASM background pool concurrency")
+PYPOOL
+
+
+# ---------------------------------------------------------------------------
+# 8. WASM has linear memory, not reservable/remappable virtual address ranges.
+# Allocate the configured maximum eagerly; decommit zeroes pages for reuse.
+python3 - "$SRC/mysys/my_virtual_mem.c" <<'PYVMEM'
+import pathlib, sys
+path = pathlib.Path(sys.argv[1])
+text = path.read_text()
+if "WASM linear memory" in text:
+    print("already applied: WASM virtual memory")
+    sys.exit()
+replacements = {
+    'char *my_virtual_mem_reserve(size_t *size)\n{\n#ifdef _WIN32':
+    '''char *my_virtual_mem_reserve(size_t *size)
+{
+#ifdef __EMSCRIPTEN__
+  /* WASM linear memory cannot reserve PROT_NONE or remap with MAP_FIXED.
+     TODO: shrinking a pool cannot return its reserved bytes until release. */
+  void *ptr= NULL;
+  if (posix_memalign(&ptr, 65536, *size))
+    return NULL;
+  memset(ptr, 0, *size);
+  return ptr;
+#elif defined(_WIN32)''',
+    'char *my_virtual_mem_commit(char *ptr, size_t size)\n{\n#ifdef _WIN32':
+    '''char *my_virtual_mem_commit(char *ptr, size_t size)
+{
+#ifdef __EMSCRIPTEN__
+  if (!ptr)
+    ptr= my_virtual_mem_reserve(&size);
+  if (!ptr)
+    return NULL;
+#elif defined(_WIN32)''',
+    'void my_virtual_mem_decommit(char *ptr, size_t size)\n{\n#ifdef _WIN32':
+    '''void my_virtual_mem_decommit(char *ptr, size_t size)
+{
+#ifdef __EMSCRIPTEN__
+  memset(ptr, 0, size);
+#elif defined(_WIN32)''',
+    'void my_virtual_mem_release(char *ptr, size_t size)\n{\n#ifdef _WIN32':
+    '''void my_virtual_mem_release(char *ptr, size_t size)
+{
+#ifdef __EMSCRIPTEN__
+  free(ptr);
+#elif defined(_WIN32)''',
+    '  int res __attribute__((unused));\n#ifdef _WIN32':
+    '''  int res __attribute__((unused));
+#ifdef __EMSCRIPTEN__
+  /* Linear memory has no per-page protection. */
+  res= 0;
+#elif defined(_WIN32)''',
+}
+for old, new in replacements.items():
+    if text.count(old) != 1:
+        sys.exit("PATCH FAILED - virtual memory anchor: " + old)
+    text = text.replace(old, new, 1)
+path.write_text(text)
+print("applied: WASM virtual memory")
+PYVMEM
+
 echo "PATCH_DONE"

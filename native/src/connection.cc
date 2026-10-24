@@ -28,7 +28,7 @@ mdb_connection_handle mdb_connection_open(const char *database_name) {
   mysql_options(connection->mysql, MYSQL_OPT_USE_EMBEDDED_CONNECTION, nullptr);
 
   if (!mysql_real_connect(connection->mysql, nullptr, nullptr, nullptr,
-                          database_name, 0, nullptr, 0)) {
+                          database_name, 0, nullptr, CLIENT_FOUND_ROWS)) {
     connection->capture_error();
     mdb::set_global_error(connection->last_errno,
                           connection->last_sql_state.c_str(),
@@ -47,6 +47,10 @@ mdb_connection_handle mdb_connection_open(const char *database_name) {
 
 int mdb_connection_close(mdb_connection_handle connection) {
   MDB_GUARD_BEGIN
+
+  mdb::Connection *current = mdb::connections().get(connection);
+  if (current && current->pending.state.load(std::memory_order_acquire) != 0)
+    return MDB_ERR_BAD_STATE;
 
   /* remove() takes it out of the table before destruction runs, so a
      concurrent call with the same handle gets BAD_HANDLE rather than racing
@@ -241,9 +245,8 @@ int run_pending_query(Connection &connection, uint32_t *produced) {
 /*
   Runs whatever the connection's pending slot asks for, on its own thread.
 
-  The connection handle is re-resolved here rather than captured as a pointer:
-  by the time this runs, the caller may have closed the connection, and the
-  handle table turns that into a lookup miss instead of a dangling pointer.
+  Resolve the handle on entry; the connection destructor signals this worker
+  and joins it before releasing the connection storage.
 */
 void *async_call_entry(void *raw) {
   std::unique_ptr<AsyncCallJob> job(static_cast<AsyncCallJob *>(raw));
@@ -254,7 +257,14 @@ void *async_call_entry(void *raw) {
   mysql_thread_init();
 
   Connection *conn = connections().get(job->connection);
-  if (conn) {
+  while (conn) {
+    {
+      std::unique_lock<std::mutex> lock(conn->work_mutex);
+      conn->work_ready.wait(lock, [&] {
+        return conn->stop_worker || conn->pending.state.load(std::memory_order_acquire) == 1;
+      });
+      if (conn->stop_worker) break;
+    }
     int status = MDB_OK;
     uint32_t produced = MDB_INVALID_HANDLE;
 
@@ -312,6 +322,7 @@ int start_pending_call(mdb_connection_handle connection_handle,
                        const uint8_t *sql,
                        size_t sql_length,
                        mdb_statement_handle statement) {
+  std::lock_guard<std::mutex> lock(connection.work_mutex);
   if (connection.pending.state.load(std::memory_order_acquire) != 0) {
     connection.last_errno = 0;
     connection.last_sql_state = "HY000";
@@ -333,21 +344,20 @@ int start_pending_call(mdb_connection_handle connection_handle,
   connection.pending.produced = MDB_INVALID_HANDLE;
   connection.pending.state.store(1, std::memory_order_release);
 
-  auto job = std::unique_ptr<AsyncCallJob>(new AsyncCallJob{connection_handle});
-
-  pthread_t thread;
-  if (pthread_create(&thread, nullptr, async_call_entry, job.get()) != 0) {
-    connection.pending.kind = PendingKind::None;
-    connection.pending.state.store(0, std::memory_order_release);
-    connection.last_errno = 0;
-    connection.last_sql_state = "HY000";
-    connection.last_message = "could not create a thread for the call";
-    return MDB_ERR_INTERNAL;
+  if (!connection.worker_started) {
+    auto job = std::unique_ptr<AsyncCallJob>(new AsyncCallJob{connection_handle});
+    if (pthread_create(&connection.worker, nullptr, async_call_entry, job.get()) != 0) {
+      connection.pending.kind = PendingKind::None;
+      connection.pending.state.store(0, std::memory_order_release);
+      connection.last_errno = 0;
+      connection.last_sql_state = "HY000";
+      connection.last_message = "could not create a thread for the connection";
+      return MDB_ERR_INTERNAL;
+    }
+    job.release();
+    connection.worker_started = true;
   }
-  job.release();
-
-  /* Detached: nothing joins it, and the caller polls for completion instead. */
-  pthread_detach(thread);
+  connection.work_ready.notify_one();
   return MDB_OK;
 }
 

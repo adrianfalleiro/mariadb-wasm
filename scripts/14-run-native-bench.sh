@@ -11,6 +11,7 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 source "$ROOT/scripts/lib/platform.sh"
 
 BUILD="$ROOT/build/native"
+tpool_link_args "$BUILD"
 LIB="$BUILD/libmysqld/libmariadbd.a"
 BIN="$BUILD/bench"
 MODES="${1:-sync async}"
@@ -35,7 +36,7 @@ fi
   "$ROOT/native/src/statement.cc" \
   "$ROOT/tests/native/bench.c" \
   "$LIB" \
-  "$BUILD/tpool/libtpool.a" \
+  ${TPOOL_LINK_ARGS[@]+"${TPOOL_LINK_ARGS[@]}"} \
   "${HOST_LINK_LIBS[@]}" \
   -o "$BIN"
 

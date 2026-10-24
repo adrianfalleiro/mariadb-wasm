@@ -13,12 +13,33 @@ import type { EmbeddedMariaDbServer } from "../src/types.ts";
 
 let server: EmbeddedMariaDbServer;
 
-before(async () => {
-  server = await createEmbeddedMariaDb({ storage: { type: "memory" } });
-}, { timeout: 120_000 });
+before(
+  async () => {
+    server = await createEmbeddedMariaDb({ storage: { type: "memory" } });
+  },
+  { timeout: 120_000 },
+);
 
 after(async () => {
   await server?.close();
+});
+
+test("runs MariaDB 11.8 and accepts MySQL 8 collation names", async () => {
+  const connection = await server.connect();
+  try {
+    const [version] = await connection.query("SELECT VERSION() AS version");
+    assert.match(String(version[0].version), /^11\.8\./);
+    await connection.query(
+      "CREATE DATABASE upgrade_118 CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_ai_ci",
+    );
+    await connection.query("USE upgrade_118");
+    await connection.query("CREATE TABLE words (word VARCHAR(40)) ENGINE=InnoDB");
+    await connection.execute("INSERT INTO words VALUES (?)", ["Café"]);
+    const [rows] = await connection.query("SELECT word FROM words WHERE word = 'cafe'");
+    assert.deepEqual(rows, [{ word: "Café" }]);
+  } finally {
+    await connection.close();
+  }
 });
 
 describe("the brief's worked example", () => {
@@ -37,9 +58,7 @@ describe("the brief's worked example", () => {
       ) ENGINE=InnoDB
     `);
 
-    await connection.execute("INSERT INTO users(email) VALUES (?)", [
-      "person@example.com",
-    ]);
+    await connection.execute("INSERT INTO users(email) VALUES (?)", ["person@example.com"]);
 
     const [rows] = await connection.query("SELECT id, email FROM users");
 
@@ -108,7 +127,7 @@ describe("type fidelity", () => {
     await connection.close();
   });
 
-  test("honours conversion options", async () => {
+  test("honours conversion options", { timeout: 120_000 }, async () => {
     const stringy = await createEmbeddedMariaDb({
       bigIntMode: "string",
       decimalMode: "number",
@@ -125,15 +144,12 @@ describe("type fidelity", () => {
       assert.equal(rows[0].big, "9007199254740993");
       assert.equal(rows[0].dec_col, 1.5);
       assert.ok(rows[0].when_col instanceof Date);
-      assert.equal(
-        (rows[0].when_col as Date).toISOString(),
-        "2026-01-02T03:04:05.000Z",
-      );
+      assert.equal((rows[0].when_col as Date).toISOString(), "2026-01-02T03:04:05.000Z");
       await connection.close();
     } finally {
       await stringy.close();
     }
-  }, { timeout: 120_000 });
+  });
 });
 
 describe("prepared statements", () => {
@@ -154,10 +170,11 @@ describe("prepared statements", () => {
 
     /* A value that would end the statement early if it were interpolated. */
     const hostile = "'); DROP TABLE p; -- ";
-    await connection.execute(
-      "INSERT INTO p(label, payload, amount) VALUES (?, ?, ?)",
-      [hostile, new Uint8Array([0, 255, 0]), 1234.5678],
-    );
+    await connection.execute("INSERT INTO p(label, payload, amount) VALUES (?, ?, ?)", [
+      hostile,
+      new Uint8Array([0, 255, 0]),
+      1234.5678,
+    ]);
 
     const [rows] = await connection.execute(
       "SELECT label, payload, amount FROM p WHERE label = ?",
@@ -181,10 +198,11 @@ describe("prepared statements", () => {
        parsed by the server, never routed through a double. */
     const beyondDouble = 9007199254740993n;
 
-    await connection.execute(
-      "INSERT INTO p(label, payload, big_val) VALUES (?, ?, ?)",
-      [null, null, beyondDouble],
-    );
+    await connection.execute("INSERT INTO p(label, payload, big_val) VALUES (?, ?, ?)", [
+      null,
+      null,
+      beyondDouble,
+    ]);
 
     const [rows] = await connection.execute(
       "SELECT label, big_val FROM p WHERE label IS NULL AND big_val = ?",
@@ -197,10 +215,7 @@ describe("prepared statements", () => {
     /* A DECIMAL too wide for its column is MariaDB's error to raise, not
        something this package should paper over. */
     await assert.rejects(
-      () =>
-        connection.execute("INSERT INTO p(amount) VALUES (?)", [
-          99999999999999999999n,
-        ]),
+      () => connection.execute("INSERT INTO p(amount) VALUES (?)", [99999999999999999999n]),
       (error: unknown) =>
         error instanceof MariaDbEmbeddedError &&
         (error as MariaDbEmbeddedError).sqlState === "22003",
@@ -229,9 +244,7 @@ describe("transactions", () => {
     const connection = await server.connect();
     await connection.query("CREATE DATABASE IF NOT EXISTS tx_db");
     await connection.query("USE tx_db");
-    await connection.query(
-      "CREATE TABLE t (id INT PRIMARY KEY, v INT NOT NULL) ENGINE=InnoDB",
-    );
+    await connection.query("CREATE TABLE t (id INT PRIMARY KEY, v INT NOT NULL) ENGINE=InnoDB");
     await connection.query("INSERT INTO t VALUES (1, 10)");
 
     await connection.beginTransaction();
@@ -288,9 +301,7 @@ describe("InnoDB relational behaviour", () => {
     const connection = await server.connect();
     await connection.query("CREATE DATABASE IF NOT EXISTS fk_db");
     await connection.query("USE fk_db");
-    await connection.query(
-      "CREATE TABLE parent (id INT PRIMARY KEY) ENGINE=InnoDB",
-    );
+    await connection.query("CREATE TABLE parent (id INT PRIMARY KEY) ENGINE=InnoDB");
     await connection.query(`
       CREATE TABLE child (
         id INT PRIMARY KEY,
@@ -322,9 +333,7 @@ describe("errors", () => {
     const connection = await server.connect();
     await connection.query("CREATE DATABASE IF NOT EXISTS err_db");
     await connection.query("USE err_db");
-    await connection.query(
-      "CREATE TABLE u (email VARCHAR(64) NOT NULL UNIQUE) ENGINE=InnoDB",
-    );
+    await connection.query("CREATE TABLE u (email VARCHAR(64) NOT NULL UNIQUE) ENGINE=InnoDB");
     await connection.query("INSERT INTO u VALUES ('a@example.com')");
 
     await assert.rejects(
@@ -348,8 +357,7 @@ describe("errors", () => {
     await assert.rejects(
       () => connection.query("THIS IS NOT SQL"),
       (error: unknown) =>
-        error instanceof MariaDbEmbeddedError &&
-        (error as MariaDbEmbeddedError).code === 1064,
+        error instanceof MariaDbEmbeddedError && (error as MariaDbEmbeddedError).code === 1064,
     );
 
     await connection.close();
@@ -389,13 +397,12 @@ describe("lifecycle", () => {
     await connection.execute("SELECT ?", [1]);
     await connection.close();
 
-    const live = (server as unknown as { liveHandles: Record<string, number> })
-      .liveHandles;
+    const live = (server as unknown as { liveHandles: Record<string, number> }).liveHandles;
     assert.equal(live.results, 0, "results should not leak");
     assert.equal(live.statements, 0, "statements should not leak");
   });
 
-  test("reset drops user schemas but keeps the server usable", async () => {
+  test("reset drops user schemas but keeps the server usable", { timeout: 60_000 }, async () => {
     const connection = await server.connect();
     await connection.query("CREATE DATABASE IF NOT EXISTS scratch_db");
     await connection.close();
@@ -404,8 +411,7 @@ describe("lifecycle", () => {
 
     const after = await server.connect();
     const [rows] = await after.query(
-      "SELECT COUNT(*) AS n FROM information_schema.SCHEMATA" +
-        " WHERE SCHEMA_NAME = 'scratch_db'",
+      "SELECT COUNT(*) AS n FROM information_schema.SCHEMATA" + " WHERE SCHEMA_NAME = 'scratch_db'",
     );
     assert.equal(rows[0].n, 0n);
 
@@ -413,9 +419,9 @@ describe("lifecycle", () => {
     const [check] = await after.query("SELECT 1 AS ok");
     assert.equal(check[0].ok, 1);
     await after.close();
-  }, { timeout: 60_000 });
+  });
 
-  test("close is idempotent and refuses later use", async () => {
+  test("close is idempotent and refuses later use", { timeout: 120_000 }, async () => {
     const disposable = await createEmbeddedMariaDb();
     await disposable.close();
     await disposable.close();
@@ -424,5 +430,34 @@ describe("lifecycle", () => {
       () => disposable.connect(),
       (error: unknown) => error instanceof MariaDbEmbeddedStateError,
     );
-  }, { timeout: 120_000 });
+  });
+});
+
+describe("generated SQL parsers", () => {
+  test("preserves routine actions and recovers from semantic aborts in both modes", async () => {
+    const connection = await server.connect();
+    try {
+      await connection.query("CREATE DATABASE parser_db");
+      await connection.query("USE parser_db");
+      await connection.query(
+        "CREATE FUNCTION add_one(v INT) RETURNS INT DETERMINISTIC BEGIN RETURN v + 1; END",
+      );
+      assert.deepEqual((await connection.execute("SELECT add_one(?) AS n", [41]))[0], [{ n: 42 }]);
+      await assert.rejects(connection.query(""), { code: 1065 });
+      assert.deepEqual((await connection.query("SELECT add_one(9) AS n"))[0], [{ n: 10 }]);
+      await connection.query("SET sql_mode = 'ORACLE'");
+      await connection.query(
+        "CREATE FUNCTION add_two(v IN INT) RETURN INT IS BEGIN RETURN v + 2; END;",
+      );
+      assert.deepEqual((await connection.execute("SELECT add_two(?) AS n FROM DUAL", [40]))[0], [
+        { n: 42 },
+      ]);
+      await assert.rejects(connection.query(""), { code: 1065 });
+      assert.deepEqual((await connection.query("SELECT add_two(8) AS n FROM DUAL"))[0], [
+        { n: 10 },
+      ]);
+    } finally {
+      await connection.close();
+    }
+  });
 });

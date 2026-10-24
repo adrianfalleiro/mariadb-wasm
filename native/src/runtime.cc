@@ -62,6 +62,14 @@ void set_global_error(uint32_t code, const char *sql_state, const char *message)
 }
 
 Connection::~Connection() {
+  if (worker_started) {
+    {
+      std::lock_guard<std::mutex> lock(work_mutex);
+      stop_worker = true;
+    }
+    work_ready.notify_one();
+    pthread_join(worker, nullptr);
+  }
   if (mysql) {
     mysql_close(mysql);
     mysql = nullptr;
@@ -158,6 +166,39 @@ int mdb_runtime_shutdown(void) {
   return MDB_OK;
 
   MDB_GUARD_END(MDB_ERR_INTERNAL)
+}
+
+/* Shutdown also performs filesystem I/O. Keep the filesystem-owning event
+   loop free, just as during startup and query execution. */
+static std::atomic<int> shutdown_state{0};
+
+int mdb_runtime_shutdown_async(void) {
+  int idle = 0;
+  if (!shutdown_state.compare_exchange_strong(idle, 1))
+    return MDB_ERR_BAD_STATE;
+
+  /* Connection opening registers this calling thread with mysys. It must
+     leave before the shutdown thread waits for all registered threads. */
+  mysql_thread_end();
+  pthread_t thread;
+  if (pthread_create(&thread, nullptr, [](void *) -> void * {
+        mysql_thread_init();
+        const int result = mdb_runtime_shutdown();
+        shutdown_state.store(result == MDB_OK ? 2 : -result,
+                             std::memory_order_release);
+        return nullptr;
+      }, nullptr) != 0) {
+    mysql_thread_init();
+    shutdown_state.store(0);
+    return MDB_ERR_INTERNAL;
+  }
+  pthread_detach(thread);
+  return MDB_OK;
+}
+
+int mdb_runtime_shutdown_poll(void) {
+  const int state = shutdown_state.load(std::memory_order_acquire);
+  return state == 2 ? 1 : state == 1 ? 0 : state < 0 ? state : -MDB_ERR_BAD_STATE;
 }
 
 int mdb_runtime_is_ready(void) { return mdb::runtime_ready() ? 1 : 0; }

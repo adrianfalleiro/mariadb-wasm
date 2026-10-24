@@ -10,6 +10,7 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 source "$ROOT/scripts/lib/platform.sh"
 
 BUILD="$ROOT/build/native"
+tpool_link_args "$BUILD"
 LIB="$BUILD/libmysqld/libmariadbd.a"
 BIN="$BUILD/abi-smoke"
 DATADIR="${SMOKE_DATADIR:-$BUILD/abi-smoke-datadir}"
@@ -19,8 +20,7 @@ if [ ! -f "$LIB" ]; then
   exit 1
 fi
 
-# libtpool.a is separate: see docs/source-inventory.md on why MERGE_LIBRARIES
-# does not fold it into libmariadbd.a.
+# Some platforms still require a separate tpool archive.
 "$HOST_CXX" -g -O1 -std=c++17 \
   -DEMBEDDED_LIBRARY -UMYSQL_CLIENT \
   -I "$ROOT/native/include" \
@@ -33,7 +33,7 @@ fi
   "$ROOT/native/src/statement.cc" \
   "$ROOT/tests/native/abi_smoke.c" \
   "$LIB" \
-  "$BUILD/tpool/libtpool.a" \
+  ${TPOOL_LINK_ARGS[@]+"${TPOOL_LINK_ARGS[@]}"} \
   "${HOST_LINK_LIBS[@]}" \
   -o "$BIN"
 

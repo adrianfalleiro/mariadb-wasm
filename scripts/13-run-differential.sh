@@ -9,6 +9,7 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 source "$ROOT/scripts/lib/platform.sh"
 
 BUILD="$ROOT/build/native"
+tpool_link_args "$BUILD"
 LIB="$BUILD/libmysqld/libmariadbd.a"
 RUNNER="$BUILD/differential-runner"
 
@@ -35,7 +36,7 @@ fi
   "$ROOT/native/src/statement.cc" \
   "$ROOT/tests/differential/runner.c" \
   "$LIB" \
-  "$BUILD/tpool/libtpool.a" \
+  ${TPOOL_LINK_ARGS[@]+"${TPOOL_LINK_ARGS[@]}"} \
   "${HOST_LINK_LIBS[@]}" \
   -o "$RUNNER"
 

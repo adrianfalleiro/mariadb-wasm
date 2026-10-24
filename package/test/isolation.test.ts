@@ -21,106 +21,81 @@ import type { EmbeddedMariaDbServer } from "../src/types.ts";
 const here = path.dirname(fileURLToPath(import.meta.url));
 
 describe("parallel isolation", () => {
-  test(
-    "four concurrent servers share no state",
-    async () => {
-      const count = 4;
+  test("four concurrent servers share no state", { timeout: 300_000 }, async () => {
+    const count = 4;
 
-      /* Created concurrently, not in sequence: serial creation would not
+    /* Created concurrently, not in sequence: serial creation would not
          exercise the case where four instances are initialising at once,
          which is when a shared-state bug would actually show. */
-      const servers: EmbeddedMariaDbServer[] = await Promise.all(
-        Array.from({ length: count }, () =>
-          createEmbeddedMariaDb({ storage: { type: "memory" } }),
-        ),
-      );
+    const servers: EmbeddedMariaDbServer[] = await Promise.all(
+      Array.from({ length: count }, () => createEmbeddedMariaDb({ storage: { type: "memory" } })),
+    );
 
-      try {
-        /* Every server builds the same schema under the same name and writes
+    try {
+      /* Every server builds the same schema under the same name and writes
            rows only it should see. */
-        await Promise.all(
-          servers.map(async (server, index) => {
-            const connection = await server.connect();
-            await connection.query("CREATE DATABASE shared_name");
-            await connection.query("USE shared_name");
-            await connection.query(`
+      await Promise.all(
+        servers.map(async (server, index) => {
+          const connection = await server.connect();
+          await connection.query("CREATE DATABASE shared_name");
+          await connection.query("USE shared_name");
+          await connection.query(`
               CREATE TABLE items (
                 id INT NOT NULL AUTO_INCREMENT,
                 owner INT NOT NULL,
                 PRIMARY KEY (id)
               ) ENGINE=InnoDB
             `);
-            for (let row = 0; row < 25; row++)
-              await connection.execute("INSERT INTO items(owner) VALUES (?)", [
-                index,
-              ]);
-            await connection.close();
-          }),
-        );
+          for (let row = 0; row < 25; row++)
+            await connection.execute("INSERT INTO items(owner) VALUES (?)", [index]);
+          await connection.close();
+        }),
+      );
 
-        await Promise.all(
-          servers.map(async (server, index) => {
-            const connection = await server.connect({ database: "shared_name" });
+      await Promise.all(
+        servers.map(async (server, index) => {
+          const connection = await server.connect({ database: "shared_name" });
 
-            const [counts] = await connection.query(
-              "SELECT COUNT(*) AS n FROM items",
-            );
-            assert.equal(
-              counts[0].n,
-              25n,
-              `server ${index} should hold exactly its own 25 rows`,
-            );
+          const [counts] = await connection.query("SELECT COUNT(*) AS n FROM items");
+          assert.equal(counts[0].n, 25n, `server ${index} should hold exactly its own 25 rows`);
 
-            const [owners] = await connection.query(
-              "SELECT DISTINCT owner FROM items",
-            );
-            assert.equal(
-              owners.length,
-              1,
-              `server ${index} saw rows from another instance`,
-            );
-            assert.equal(owners[0].owner, index);
+          const [owners] = await connection.query("SELECT DISTINCT owner FROM items");
+          assert.equal(owners.length, 1, `server ${index} saw rows from another instance`);
+          assert.equal(owners[0].owner, index);
 
-            await connection.close();
-          }),
-        );
-      } finally {
-        await Promise.all(servers.map((server) => server.close()));
-      }
-    },
-    { timeout: 300_000 },
-  );
+          await connection.close();
+        }),
+      );
+    } finally {
+      await Promise.all(servers.map((server) => server.close()));
+    }
+  });
 
-  test(
-    "a server survives repeated create/close cycles",
-    async () => {
-      /* Startup and shutdown must be deterministic, which is the property the
+  test("a server survives repeated create/close cycles", { timeout: 300_000 }, async () => {
+    /* Startup and shutdown must be deterministic, which is the property the
          old deadlock broke. Doing it repeatedly in one process also catches
          state leaking between instances. */
-      for (let round = 0; round < 3; round++) {
-        const server = await createEmbeddedMariaDb();
-        const connection = await server.connect();
-        await connection.query("CREATE DATABASE round_db");
-        await connection.query("USE round_db");
-        await connection.query(
-          "CREATE TABLE t (id INT PRIMARY KEY) ENGINE=InnoDB",
-        );
-        await connection.query("INSERT INTO t VALUES (1)");
+    for (let round = 0; round < 3; round++) {
+      const server = await createEmbeddedMariaDb();
+      const connection = await server.connect();
+      await connection.query("CREATE DATABASE round_db");
+      await connection.query("USE round_db");
+      await connection.query("CREATE TABLE t (id INT PRIMARY KEY) ENGINE=InnoDB");
+      await connection.query("INSERT INTO t VALUES (1)");
 
-        const [rows] = await connection.query("SELECT COUNT(*) AS n FROM t");
-        assert.equal(rows[0].n, 1n, `round ${round} lost its row`);
+      const [rows] = await connection.query("SELECT COUNT(*) AS n FROM t");
+      assert.equal(rows[0].n, 1n, `round ${round} lost its row`);
 
-        await connection.close();
-        await server.close();
-      }
-    },
-    { timeout: 300_000 },
-  );
+      await connection.close();
+      await server.close();
+    }
+  });
 });
 
 describe("test-worker ownership", () => {
   test(
     "two worker_threads each run their own runtime and Node still exits",
+    { timeout: 300_000 },
     async () => {
       /*
         The topology a parallel test runner produces: one MariaDB per worker.
@@ -150,6 +125,5 @@ describe("test-worker ownership", () => {
       assert.equal(first, 1, "worker 1 should see only its own row");
       assert.equal(second, 2, "worker 2 should see only its own row");
     },
-    { timeout: 300_000 },
   );
 });

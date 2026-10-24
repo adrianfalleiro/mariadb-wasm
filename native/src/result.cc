@@ -1,5 +1,6 @@
 /* Result-set iteration and cell access. */
 #include "internal.h"
+#include "mysql/plugin.h"
 
 extern "C" {
 
@@ -151,6 +152,20 @@ uint32_t mdb_result_column_type(mdb_result_handle result, uint32_t column) {
 
   return static_cast<uint32_t>(res->fields[column].type);
 
+  MDB_GUARD_END(0)
+}
+
+int mdb_result_column_is_json(mdb_result_handle result, uint32_t column) {
+  MDB_GUARD_BEGIN
+  mdb::Result *res = mdb::results().get(result);
+  if (!res || !res->fields || column >= res->column_count)
+    return 0;
+  MARIADB_CONST_STRING format = {nullptr, 0};
+  if (mariadb_field_attr(&format, &res->fields[column], MARIADB_FIELD_ATTR_FORMAT_NAME))
+    return 0;
+  return format.length == 4 && format.str &&
+         format.str[0] == 'j' && format.str[1] == 's' &&
+         format.str[2] == 'o' && format.str[3] == 'n';
   MDB_GUARD_END(0)
 }
 

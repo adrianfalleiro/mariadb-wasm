@@ -1,18 +1,47 @@
 {
   "name": "@mariadb-wasm/embedded",
   "version": "0.0.0",
+  "private": true,
   "description": "MariaDB's embedded server (libmariadbd) compiled to WebAssembly, for Node test suites",
+  "license": "GPL-2.0-only",
+  "files": [
+    "src",
+    "../dist"
+  ],
   "type": "module",
   "exports": {
-    ".": "./src/index.ts"
-  },
-  "files": ["src", "../dist"],
-  "engines": {
-    "node": ">=22.6.0"
+    ".": "./src/index.ts",
+    "./browser": "./src/browser.ts",
+    "./mysql2/promise": "./src/mysql2.ts",
+    "./mariadb": "./src/mariadb.ts",
+    "./shared": "./src/shared.ts",
+    "./mysql2": "./src/mysql2-callback.ts",
+    "./mariadb/callback": "./src/mariadb-callback.ts"
   },
   "scripts": {
-    "test": "node --test 'test/*.test.ts'"
+    "test": "node --test 'test/*.test.ts'",
+    "build:browser": "node ../scripts/build-browser.mjs",
+    "test:browser": "node --test ../tests/browser/*.test.mjs",
+    "typecheck": "tsc -p tsconfig.json",
+    "test:contract": "bash ../scripts/run-driver-contract.sh",
+    "test:memory": "node --test test/memory.test.ts ../tests/wasm/memory.test.mjs"
   },
-  "license": "GPL-2.0-only",
-  "private": true
+  "dependencies": {
+    "buffer": "^6.0.3",
+    "events": "^3.3.0",
+    "sqlstring": "^2.3.3"
+  },
+  "devDependencies": {
+    "@types/node": "^24.0.0",
+    "@types/sqlstring": "^2.3.2",
+    "esbuild": "^0.25.0",
+    "knex": "^3.2.0",
+    "mariadb": "^3.5.4",
+    "mysql2": "^3.24.6",
+    "playwright": "^1.58.0",
+    "typescript": "^5.9.0"
+  },
+  "engines": {
+    "node": ">=22.6.0"
+  }
 }

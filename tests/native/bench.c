@@ -3,7 +3,7 @@
   the same C ABI.
 
   This is the only comparison that isolates what WebAssembly costs. Both sides
-  are MariaDB 11.4.4's embedded server, the same wrapper sources, the same
+  are MariaDB 11.8.9's embedded server, the same wrapper sources, the same
   server options, the same statements in the same order; the compilation
   target is the only difference. Comparing against a packaged mariadbd instead
   would fold in the wire protocol, a scheduler, and whatever the distribution

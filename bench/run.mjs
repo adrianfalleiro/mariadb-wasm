@@ -25,13 +25,15 @@ const here = path.dirname(fileURLToPath(import.meta.url));
 const root = path.resolve(here, "..");
 
 const IMAGE = process.env.BENCH_IMAGE ?? "public.ecr.aws/docker/library/mysql:8.0.42";
-const CONTAINER = "mariadb-wasm-bench";
-const PORT = Number(process.env.BENCH_PORT ?? 13306);
+const CONTAINER = `mariadb-wasm-bench-${process.pid}-${Date.now()}`;
+let ownsContainer = false;
+let PORT = Number(process.env.BENCH_PORT ?? 0);
 const TESTS_PER_WORKER = Number(process.env.BENCH_TESTS ?? 100);
-const WORKER_COUNTS = (process.env.BENCH_WORKERS ?? "1,4")
-  .split(",").map(Number);
+const WORKER_COUNTS = (process.env.BENCH_WORKERS ?? "1,4").split(",").map(Number);
 
-const onlyEmbedded = process.argv.includes("--embedded");
+const onlyShared = process.argv.includes("--shared");
+const onlyEmbedded = process.argv.includes("--embedded") || onlyShared;
+const onlyServer = process.argv.includes("--server");
 
 const ms = (v) => `${v.toFixed(0)} ms`;
 const secs = (v) => `${(v / 1000).toFixed(2)} s`;
@@ -48,14 +50,12 @@ function docker(args, opts = {}) {
 */
 function containerMemoryBytes() {
   try {
-    const out = docker([
-      "stats", "--no-stream", "--format", "{{.MemUsage}}", CONTAINER,
-    ]).trim();
+    const out = docker(["stats", "--no-stream", "--format", "{{.MemUsage}}", CONTAINER]).trim();
     const [used] = out.split("/");
     const match = /([\d.]+)\s*([a-zA-Z]+)/.exec(used.trim());
     if (!match) return 0;
-    const scale = { B: 1, KiB: 1024, MiB: 1048576, GiB: 1073741824,
-                    kB: 1000, MB: 1e6, GB: 1e9 }[match[2]] ?? 1;
+    const scale =
+      { B: 1, KiB: 1024, MiB: 1048576, GiB: 1073741824, kB: 1000, MB: 1e6, GB: 1e9 }[match[2]] ?? 1;
     return Number(match[1]) * scale;
   } catch {
     return 0;
@@ -63,7 +63,8 @@ function containerMemoryBytes() {
 }
 
 function stopContainer() {
-  spawnSync("docker", ["rm", "-f", CONTAINER], { stdio: "ignore" });
+  if (ownsContainer) spawnSync("docker", ["rm", "-f", CONTAINER], { stdio: "ignore" });
+  ownsContainer = false;
 }
 
 /*
@@ -73,15 +74,18 @@ function stopContainer() {
   "accepts queries" are not the same moment and the gap is most of the cost.
 */
 async function startServerColdMeasured() {
-  stopContainer();
-
   const mysql = await import("mysql2/promise");
   const started = performance.now();
 
   docker([
-    "run", "-d", "--name", CONTAINER,
-    "-e", "MYSQL_ROOT_PASSWORD=bench",
-    "-p", `${PORT}:3306`,
+    "run",
+    "-d",
+    "--name",
+    CONTAINER,
+    "-e",
+    "MYSQL_ROOT_PASSWORD=bench",
+    "-p",
+    `127.0.0.1:${PORT}:3306`,
     IMAGE,
     /* Comparable durability to the embedded defaults, so the server is not
        penalised for guarantees the embedded build does not offer. */
@@ -91,10 +95,16 @@ async function startServerColdMeasured() {
     "--performance-schema=OFF",
   ]);
 
+  ownsContainer = true;
+  PORT = Number(docker(["port", CONTAINER, "3306/tcp"]).trim().split(":").at(-1));
+
   for (;;) {
     try {
       const c = await mysql.createConnection({
-        host: "127.0.0.1", port: PORT, user: "root", password: "bench",
+        host: "127.0.0.1",
+        port: PORT,
+        user: "root",
+        password: "bench",
         connectTimeout: 1000,
       });
       await c.query("SELECT 1");
@@ -112,23 +122,40 @@ async function startServerColdMeasured() {
 
 /* --- suite execution ----------------------------------------------------- */
 
-function runWorkers(backend, count, tests) {
-  return Promise.all(
-    Array.from({ length: count }, (_, index) =>
-      new Promise((resolve, reject) => {
-        const worker = new Worker(new URL("./worker.mjs", import.meta.url), {
-          workerData: { backend, root, port: PORT, index, tests },
-        });
-        let result;
-        worker.on("message", (m) => { result = m; });
-        worker.on("error", reject);
-        worker.on("exit", (code) =>
-          code === 0 && result
-            ? resolve(result)
-            : reject(new Error(`worker ${index} exited ${code}`)));
-      }),
-    ),
-  );
+async function runWorkers(backend, count, tests) {
+  const host =
+    backend === "shared"
+      ? await (await import("../package/src/shared.ts")).createSharedDatabaseWorker()
+      : undefined;
+  try {
+    const ports = host
+      ? await Promise.all(Array.from({ length: count }, () => host.createClientPort()))
+      : [];
+    return await Promise.all(
+      Array.from(
+        { length: count },
+        (_, index) =>
+          new Promise((resolve, reject) => {
+            const worker = new Worker(new URL("./worker.mjs", import.meta.url), {
+              workerData: { backend, root, port: PORT, index, tests, clientPort: ports[index] },
+              transferList: ports[index] ? [ports[index]] : [],
+            });
+            let result;
+            worker.on("message", (m) => {
+              result = m;
+            });
+            worker.on("error", reject);
+            worker.on("exit", (code) =>
+              code === 0 && result
+                ? resolve(result)
+                : reject(new Error(`worker ${index} exited ${code}`)),
+            );
+          }),
+      ),
+    );
+  } finally {
+    await host?.close();
+  }
 }
 
 async function measureSuite(backend, workers, tests) {
@@ -171,7 +198,8 @@ const rows = [];
 function record(scenario, backend, coldMs, suite) {
   const statements = suite.totalTests * STATEMENTS_PER_TEST;
   rows.push({
-    scenario, backend,
+    scenario,
+    backend,
     workers: suite.totalTests / suite.testsPerWorker,
     testsPerWorker: suite.testsPerWorker,
     cold: coldMs,
@@ -179,24 +207,26 @@ function record(scenario, backend, coldMs, suite) {
     tests: suite.tests,
     wall: suite.wall,
     total: (coldMs ?? 0) + suite.wall,
-    perTest: suite.tests / (suite.totalTests / /* per worker */ 1) ,
+    perTest: suite.tests / (suite.totalTests / /* per worker */ 1),
     statements,
     rssMb: suite.rss / 1048576,
   });
 }
 
-console.log(`workload: ${TESTS_PER_WORKER} tests/worker, ` +
-  `${STATEMENTS_PER_TEST} statements each, transaction-rollback isolation`);
+console.log(
+  `workload: ${TESTS_PER_WORKER} tests/worker, ` +
+    `${STATEMENTS_PER_TEST} statements each, transaction-rollback isolation`,
+);
 console.log(`workers:  ${WORKER_COUNTS.join(", ")}`);
 console.log(`image:    ${onlyEmbedded ? "(skipped)" : IMAGE}\n`);
 
 try {
   /* Embedded: "cold start" is module load, which is already inside setup, so
      there is no separate cost to attribute. That is the point. */
-  for (const workers of WORKER_COUNTS) {
-    process.stdout.write(`embedded wasm, ${workers} worker(s)... `);
-    const suite = await measureSuite("embedded", workers, TESTS_PER_WORKER);
-    record(`${workers} worker(s)`, "embedded wasm", 0, suite);
+  for (const workers of onlyServer ? [] : WORKER_COUNTS) {
+    process.stdout.write(`${onlyShared ? "shared" : "embedded"} wasm, ${workers} worker(s)... `);
+    const suite = await measureSuite(onlyShared ? "shared" : "embedded", workers, TESTS_PER_WORKER);
+    record(`${workers} worker(s)`, onlyShared ? "shared wasm" : "embedded wasm", 0, suite);
     console.log(secs(suite.wall));
   }
 
@@ -221,19 +251,27 @@ try {
 
 console.log("\n" + "".padEnd(96, "="));
 console.log(
-  "scenario".padEnd(14) + "backend".padEnd(16) +
-  "cold".padStart(10) + "setup".padStart(10) + "tests".padStart(10) +
-  "wall".padStart(10) + "total".padStart(11) + "rss".padStart(10));
+  "scenario".padEnd(14) +
+    "backend".padEnd(16) +
+    "cold".padStart(10) +
+    "setup".padStart(10) +
+    "tests".padStart(10) +
+    "wall".padStart(10) +
+    "total".padStart(11) +
+    "rss".padStart(10),
+);
 console.log("".padEnd(96, "="));
 for (const r of rows) {
   console.log(
-    r.scenario.padEnd(14) + r.backend.padEnd(16) +
-    (r.cold ? ms(r.cold) : "—").padStart(10) +
-    ms(r.setup).padStart(10) +
-    ms(r.tests).padStart(10) +
-    ms(r.wall).padStart(10) +
-    secs(r.total).padStart(11) +
-    `${r.rssMb.toFixed(0)} MB`.padStart(10));
+    r.scenario.padEnd(14) +
+      r.backend.padEnd(16) +
+      (r.cold ? ms(r.cold) : "—").padStart(10) +
+      ms(r.setup).padStart(10) +
+      ms(r.tests).padStart(10) +
+      ms(r.wall).padStart(10) +
+      secs(r.total).padStart(11) +
+      `${r.rssMb.toFixed(0)} MB`.padStart(10),
+  );
 }
 console.log("".padEnd(96, "="));
 
@@ -252,17 +290,23 @@ for (const workers of WORKER_COUNTS) {
   const serverPerTest = server.tests / server.testsPerWorker;
   const penalty = wasmPerTest - serverPerTest;
 
-  console.log(`\n${workers} worker(s): ${wasmPerTest.toFixed(2)} ms/test embedded vs ` +
-    `${serverPerTest.toFixed(2)} ms/test on the server`);
+  console.log(
+    `\n${workers} worker(s): ${wasmPerTest.toFixed(2)} ms/test embedded vs ` +
+      `${serverPerTest.toFixed(2)} ms/test on the server`,
+  );
 
   if (penalty <= 0) {
     console.log("  the embedded build is faster per test too — it wins at any size");
   } else {
     const breakEven = Math.round((server.cold + server.setup - wasm.setup) / penalty);
-    console.log(`  embedded is ${(wasmPerTest / serverPerTest).toFixed(1)}x slower per test, ` +
-      `but starts ${secs(server.cold)} sooner`);
-    console.log(`  break-even: ~${breakEven.toLocaleString()} tests per worker ` +
-      `(${(breakEven * workers).toLocaleString()} total) at this suite size`);
+    console.log(
+      `  embedded is ${(wasmPerTest / serverPerTest).toFixed(1)}x slower per test, ` +
+        `but starts ${secs(server.cold)} sooner`,
+    );
+    console.log(
+      `  break-even: ~${breakEven.toLocaleString()} tests per worker ` +
+        `(${(breakEven * workers).toLocaleString()} total) at this suite size`,
+    );
     console.log("  extrapolated, and it moves: the embedded build has a fixed");
     console.log("  warm-up that amortises, while the server contends more as workers");
     console.log("  are added, so both per-test figures shift with suite size. Run the");
@@ -272,8 +316,11 @@ for (const workers of WORKER_COUNTS) {
 
 console.log(
   "\ncold  = until the first query is possible (CI pays this every run)" +
-  "\nsetup = slowest worker's isolated-database + schema setup" +
-  "\ntests = slowest worker's test execution" +
-  "\nwall  = whole suite, all workers in parallel" +
-  "\ntotal = cold + wall, i.e. what a CI run actually costs" +
-  "\nrss   = peak of the whole test process, plus the container for the server");
+    "\nsetup = slowest worker's isolated-database + schema setup" +
+    "\ntests = slowest worker's test execution" +
+    "\nwall  = whole suite, all workers in parallel" +
+    "\ntotal = cold + wall, i.e. what a CI run actually costs" +
+    "\nrss   = peak of the whole test process, plus the container for the server",
+);
+
+console.log("RESULT_JSON=" + JSON.stringify(rows));

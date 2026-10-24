@@ -3,16 +3,17 @@
   method per C ABI entry point. Everything above this file works in handles
   and JavaScript values; everything below is pointers.
 */
-import fs from "node:fs";
-import path from "node:path";
-import { fileURLToPath } from "node:url";
+const isNode = typeof process !== "undefined" && !!process.versions?.node;
+const fs = isNode ? (await import("node:fs")).default : undefined;
+const path = isNode ? (await import("node:path")).default : undefined;
+const fileURLToPath = isNode ? (await import("node:url")).fileURLToPath : undefined;
 
 import { MDB_OK } from "./types.ts";
 import { MariaDbEmbeddedError } from "./errors.ts";
 
-const here = path.dirname(fileURLToPath(import.meta.url));
+const here = isNode ? path!.dirname(fileURLToPath!(import.meta.url)) : "";
 /* package/src -> repo root. Overridable via options.modulePath. */
-const defaultDistDir = path.resolve(here, "..", "..", "dist");
+const defaultDistDir = isNode ? path!.resolve(here, "..", "..", "dist") : "";
 
 export interface MdbError {
   code: number;
@@ -21,12 +22,20 @@ export interface MdbError {
 }
 
 interface EmscriptenModule {
-  ccall(name: string, returnType: string | null, argTypes: string[], args: unknown[]): number;
+  ccall(
+    name: string,
+    returnType: string | null,
+    argTypes: string[],
+    args: unknown[],
+  ): number | bigint;
   UTF8ToString(ptr: number): string;
   FS: {
     mkdirTree(path: string): void;
     writeFile(path: string, data: Uint8Array): void;
     readdir(path: string): string[];
+    readFile(path: string): Uint8Array;
+    stat(path: string): { mode: number };
+    isDir(mode: number): boolean;
     mount(type: unknown, opts: unknown, mountpoint: string): void;
     unmount(mountpoint: string): void;
   };
@@ -53,10 +62,15 @@ export class WasmRuntime {
   }
 
   static async load(options: { modulePath?: string; debug?: boolean } = {}) {
-    const distDir = options.modulePath
-      ? path.dirname(path.resolve(options.modulePath))
-      : defaultDistDir;
-    const modulePath = options.modulePath ?? path.join(distDir, "mariadb.mjs");
+    const distDir =
+      isNode && options.modulePath
+        ? path!.dirname(path!.resolve(options.modulePath))
+        : defaultDistDir;
+    const modulePath =
+      options.modulePath ??
+      (isNode
+        ? path!.join(distDir, "mariadb.mjs")
+        : new URL("./mariadb.mjs", import.meta.url).href);
 
     const factory = (await import(modulePath)).default as (
       init: Record<string, unknown>,
@@ -84,19 +98,25 @@ export class WasmRuntime {
 
     const runtime = new WasmRuntime(module, distDir, debug);
     runtime.#stderr = stderr;
-    runtime.#mountStaticData();
-    return runtime;
+    try {
+      runtime.#mountStaticData();
+      return runtime;
+    } catch (error) {
+      runtime.terminateThreads();
+      throw error;
+    }
   }
 
   /* errmsg.sys and the charset XML are staged next to the module by
      scripts/05-link-wasm-module.sh, and mounted read-only rather than copied
      so they cost nothing per instance. */
   #mountStaticData() {
+    if (!isNode) return;
     const { FS, NODEFS } = this.#module;
     FS.mkdirTree("/mariadb/share");
     FS.mkdirTree("/mariadb/charsets");
-    FS.mount(NODEFS, { root: path.join(this.#distDir, "share") }, "/mariadb/share");
-    FS.mount(NODEFS, { root: path.join(this.#distDir, "charsets") }, "/mariadb/charsets");
+    FS.mount(NODEFS, { root: path!.join(this.#distDir, "share") }, "/mariadb/share");
+    FS.mount(NODEFS, { root: path!.join(this.#distDir, "charsets") }, "/mariadb/charsets");
   }
 
   get capturedStderr(): readonly string[] {
@@ -134,21 +154,36 @@ export class WasmRuntime {
     before the template existed.
   */
   copyTemplate(templateDir: string, datadir: string, skip: readonly string[] = []): boolean {
-    if (!fs.existsSync(templateDir)) return false;
+    if (!isNode) {
+      const { FS } = this.#module;
+      const copy = (source: string, target: string) => {
+        FS.mkdirTree(target);
+        for (const name of FS.readdir(source)) {
+          if (name === "." || name === ".." || skip.includes(name)) continue;
+          const src = `${source}/${name}`,
+            dst = `${target}/${name}`;
+          if (FS.isDir(FS.stat(src).mode)) copy(src, dst);
+          else FS.writeFile(dst, FS.readFile(src));
+        }
+      };
+      copy("/mariadb/template", datadir);
+      return true;
+    }
+    if (!fs!.existsSync(templateDir)) return false;
 
     const { FS } = this.#module;
     FS.mkdirTree(datadir);
 
     const walk = (hostDir: string, vfsDir: string) => {
-      for (const entry of fs.readdirSync(hostDir, { withFileTypes: true })) {
+      for (const entry of fs!.readdirSync(hostDir, { withFileTypes: true })) {
         if (skip.includes(entry.name)) continue;
-        const hostPath = path.join(hostDir, entry.name);
+        const hostPath = path!.join(hostDir, entry.name);
         const vfsPath = `${vfsDir}/${entry.name}`;
         if (entry.isDirectory()) {
           FS.mkdirTree(vfsPath);
           walk(hostPath, vfsPath);
         } else if (entry.isFile()) {
-          FS.writeFile(vfsPath, fs.readFileSync(hostPath));
+          FS.writeFile(vfsPath, fs!.readFileSync(hostPath));
         }
       }
     };
@@ -157,11 +192,18 @@ export class WasmRuntime {
     return true;
   }
 
-  get distDir(): string {
-    return this.#distDir;
+  templateDirectory(): string {
+    return isNode ? path!.join(this.#distDir, "datadir-template") : "/mariadb/template";
+  }
+
+  deferredDDL(): string {
+    const filename = `${this.templateDirectory()}/innodb-system-tables.sql`;
+    if (!isNode) return new TextDecoder().decode(this.#module.FS.readFile(filename));
+    return fs!.existsSync(filename) ? fs!.readFileSync(filename, "utf8") : "";
   }
 
   mountNodeFs(hostDirectory: string, mountpoint: string) {
+    if (!isNode) throw new Error("node storage is unavailable in a browser");
     this.#module.FS.mkdirTree(mountpoint);
     this.#module.FS.mount(this.#module.NODEFS, { root: hostDirectory }, mountpoint);
   }
@@ -183,14 +225,21 @@ export class WasmRuntime {
   }
 
   #call(name: string, argTypes: string[], args: unknown[]): number {
-    return this.#module.ccall(name, "number", argTypes, args);
+    return Number(this.#module.ccall(name, "number", argTypes, args));
   }
 
-  #readError(fn: string, handle: number): MdbError {
+  #readError(fn: string, handle?: number): MdbError {
     /* mdb_error is { uint32; const char*; const char* } — 12 bytes on wasm32. */
     const ptr = this.#module._malloc(12);
     try {
-      if (this.#call(fn, ["number", "number"], [handle, ptr]) !== MDB_OK)
+      const args = handle === undefined ? [ptr] : [handle, ptr];
+      if (
+        this.#call(
+          fn,
+          args.map(() => "number"),
+          args,
+        ) !== MDB_OK
+      )
         return { code: 0, sqlState: "HY000", message: "no error detail available" };
       const base = ptr >> 2;
       return {
@@ -213,9 +262,7 @@ export class WasmRuntime {
     loop keeps the main thread free to service those calls.
   */
   async initAsync(serverArgs: readonly string[], timeoutMs = 60_000) {
-    const pointers = serverArgs.map((arg) =>
-      this.#allocBytes(encoder.encode(arg + "\0")),
-    );
+    const pointers = serverArgs.map((arg) => this.#allocBytes(encoder.encode(arg + "\0")));
     const arrayPtr = this.#module._malloc(Math.max(pointers.length * 4, 4));
     pointers.forEach((p, i) => {
       this.#u32[(arrayPtr >> 2) + i] = p;
@@ -236,8 +283,7 @@ export class WasmRuntime {
         if (poll < 0) throw this.#globalError("MariaDB initialisation failed");
         if (Date.now() > deadline)
           throw new MariaDbEmbeddedError(
-            `MariaDB initialisation did not complete within ${timeoutMs}ms.\n` +
-              this.diagnostics(),
+            `MariaDB initialisation did not complete within ${timeoutMs}ms.\n` + this.diagnostics(),
           );
         /* Yielding is the point; the delay is incidental. */
         await new Promise((resolve) => setTimeout(resolve, 1));
@@ -248,25 +294,17 @@ export class WasmRuntime {
     }
   }
 
-  shutdown(): number {
-    /*
-      MariaDB's wait for its registered threads is left in place, deliberately.
-
-      It used to be skipped: one thread never called my_thread_end, so the
-      wait ran its full five seconds on every shutdown and printed "1 threads
-      didn't exit". That thread was the one running mdb_runtime_init_async —
-      mysql_server_init registers its caller with mysys, and it exited without
-      unregistering. It now ends properly, the count reaches zero, and the
-      wait returns immediately.
-
-      Keeping the wait is worth more than the microseconds it costs when it
-      succeeds. MariaDB skips destroying its global mutexes when the wait
-      times out, precisely because a live thread might still touch them, so a
-      shutdown that waits is the one that actually establishes there is
-      nothing left running. shutdownIsClean() below is how a regression here
-      surfaces as a test failure rather than as five silent seconds.
-    */
-    return this.#call("mdb_runtime_shutdown", [], []);
+  async shutdown(): Promise<void> {
+    const status = this.#call("mdb_runtime_shutdown_async", [], []);
+    if (status !== MDB_OK) throw this.#globalError("could not start shutdown");
+    const deadline = Date.now() + 60000;
+    for (;;) {
+      const poll = this.#call("mdb_runtime_shutdown_poll", [], []);
+      if (poll === 1) return;
+      if (poll < 0) throw this.#globalError("MariaDB shutdown failed");
+      if (Date.now() > deadline) throw new Error("MariaDB shutdown timed out");
+      await yieldToRuntime();
+    }
   }
 
   /*
@@ -295,31 +333,24 @@ export class WasmRuntime {
   }
 
   #globalError(fallback: string): MariaDbEmbeddedError {
-    const error = this.#readError("mdb_last_global_error", 0);
-    return new MariaDbEmbeddedError(
-      `${error.message || fallback}\n${this.diagnostics()}`,
-      { code: error.code, sqlState: error.sqlState },
-    );
+    const error = this.#readError("mdb_last_global_error");
+    return new MariaDbEmbeddedError(`${error.message || fallback}\n${this.diagnostics()}`, {
+      code: error.code,
+      sqlState: error.sqlState,
+    });
   }
 
   diagnostics(): string {
     const tail = this.#stderr.slice(-40);
-    return tail.length
-      ? `MariaDB output:\n  ${tail.join("\n  ")}`
-      : "MariaDB produced no output.";
+    return tail.length ? `MariaDB output:\n  ${tail.join("\n  ")}` : "MariaDB produced no output.";
   }
 
   /* --- connections ------------------------------------------------------- */
 
-  connectionOpen(database?: string): number {
-    const ptr = database ? this.#allocBytes(encoder.encode(database + "\0")) : 0;
-    try {
-      const handle = this.#call("mdb_connection_open", ["number"], [ptr]);
-      if (!handle) throw this.#globalError("could not open an embedded connection");
-      return handle;
-    } finally {
-      if (ptr) this.#free(ptr);
-    }
+  connectionOpen(): number {
+    const handle = this.#call("mdb_connection_open", ["number"], [0]);
+    if (!handle) throw this.#globalError("could not open an embedded connection");
+    return handle;
   }
 
   connectionClose(handle: number): number {
@@ -348,7 +379,7 @@ export class WasmRuntime {
   }
 
   /*
-    Runs a query on its own thread and polls from the event loop.
+    Runs a query on the connection's reusable thread and polls from the event loop.
 
     This is the default rather than the synchronous path for two reasons.
 
@@ -393,7 +424,7 @@ export class WasmRuntime {
         );
         if (poll === 1) return this.#u32[outPtr >> 2];
         if (poll < 0) throw this.connectionError(handle, sql);
-        await new Promise((resolve) => setImmediate(resolve));
+        await yieldToRuntime();
       }
     } finally {
       this.#free(outPtr);
@@ -410,10 +441,10 @@ export class WasmRuntime {
   }
 
   affectedRows(handle: number): number {
-    return this.#call("mdb_connection_affected_rows", ["number"], [handle]);
+    return Number(this.#call("mdb_connection_affected_rows", ["number"], [handle]));
   }
-  insertId(handle: number): number {
-    return this.#call("mdb_connection_insert_id", ["number"], [handle]);
+  insertId(handle: number): bigint {
+    return BigInt(this.#module.ccall("mdb_connection_insert_id", "bigint", ["number"], [handle]));
   }
   warningCount(handle: number): number {
     return this.#call("mdb_connection_warning_count", ["number"], [handle]);
@@ -438,6 +469,7 @@ export class WasmRuntime {
     return {
       name: namePtr ? this.#module.UTF8ToString(namePtr) : `col_${index}`,
       type: this.#call("mdb_result_column_type", ["number", "number"], [handle, index]),
+      json: Boolean(this.#call("mdb_result_column_is_json", ["number", "number"], [handle, index])),
       flags: this.#call("mdb_result_column_flags", ["number", "number"], [handle, index]),
       decimals: this.#call("mdb_result_column_decimals", ["number", "number"], [handle, index]),
       charsetnr: this.#call("mdb_result_column_charsetnr", ["number", "number"], [handle, index]),
@@ -446,8 +478,7 @@ export class WasmRuntime {
 
   /* Returns null for SQL NULL, which is distinct from a zero-length value. */
   columnValue(handle: number, index: number): Uint8Array | null {
-    if (this.#call("mdb_result_value_is_null", ["number", "number"], [handle, index]))
-      return null;
+    if (this.#call("mdb_result_value_is_null", ["number", "number"], [handle, index])) return null;
 
     const ptr = this.#call("mdb_result_value_data", ["number", "number"], [handle, index]);
     const length = this.#call("mdb_result_value_length", ["number", "number"], [handle, index]);
@@ -501,7 +532,7 @@ export class WasmRuntime {
         );
         if (poll === 1) return this.#u32[outPtr >> 2];
         if (poll < 0) throw this.connectionError(connection, sql);
-        await new Promise((resolve) => setImmediate(resolve));
+        await yieldToRuntime();
       }
     } finally {
       this.#free(outPtr);
@@ -531,11 +562,7 @@ export class WasmRuntime {
   */
 
   bindDouble(handle: number, index: number, value: number) {
-    this.#call(
-      "mdb_statement_bind_double",
-      ["number", "number", "number"],
-      [handle, index, value],
-    );
+    this.#call("mdb_statement_bind_double", ["number", "number", "number"], [handle, index, value]);
   }
 
   bindBytes(handle: number, index: number, bytes: Uint8Array, binary: boolean) {
@@ -556,11 +583,7 @@ export class WasmRuntime {
      finished before this is called, since the worker thread reads those
      buffers. */
   async statementExecuteAsync(handle: number): Promise<number> {
-    const submitted = this.#call(
-      "mdb_statement_execute_async",
-      ["number"],
-      [handle],
-    );
+    const submitted = this.#call("mdb_statement_execute_async", ["number"], [handle]);
     if (submitted !== MDB_OK) throw this.statementError(handle);
 
     const outPtr = this.#module._malloc(4);
@@ -574,7 +597,7 @@ export class WasmRuntime {
         );
         if (poll === 1) return this.#u32[outPtr >> 2];
         if (poll < 0) throw this.statementError(handle);
-        await new Promise((resolve) => setImmediate(resolve));
+        await yieldToRuntime();
       }
     } finally {
       this.#free(outPtr);
@@ -591,12 +614,26 @@ export class WasmRuntime {
   }
 
   statementAffectedRows(handle: number): number {
-    return this.#call("mdb_statement_affected_rows", ["number"], [handle]);
+    return Number(this.#call("mdb_statement_affected_rows", ["number"], [handle]));
   }
-  statementInsertId(handle: number): number {
-    return this.#call("mdb_statement_insert_id", ["number"], [handle]);
+  statementInsertId(handle: number): bigint {
+    return BigInt(this.#module.ccall("mdb_statement_insert_id", "bigint", ["number"], [handle]));
   }
   statementClose(handle: number): number {
     return this.#call("mdb_statement_close", ["number"], [handle]);
   }
+}
+
+const wakeups: Array<() => void> = [];
+let channel: MessageChannel | undefined;
+function yieldToRuntime(): Promise<void> {
+  if (isNode) return new Promise((resolve) => setImmediate(resolve));
+  if (!channel) {
+    channel = new MessageChannel();
+    channel.port1.onmessage = () => wakeups.shift()?.();
+  }
+  return new Promise((resolve) => {
+    wakeups.push(resolve);
+    channel!.port2.postMessage(null);
+  });
 }

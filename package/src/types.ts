@@ -1,8 +1,6 @@
 /* Public types, plus the protocol constants the decoder needs. */
 
-export type StorageMode =
-  | { type: "memory" }
-  | { type: "node"; directory: string };
+export type StorageMode = { type: "memory" } | { type: "node"; directory: string };
 
 /*
   Conversion policy. Defaults are lossless: MariaDB values that JavaScript's
@@ -26,6 +24,8 @@ export interface EmbeddedMariaDbOptions extends ConversionOptions {
 }
 
 export interface FieldMetadata {
+  /** MariaDB extended format metadata; absent for ordinary text. */
+  json?: boolean;
   name: string;
   /* Raw MariaDB type code, kept so callers can tell exactly what came back. */
   type: number;
@@ -51,10 +51,7 @@ export interface QueryResult {
 
 export interface EmbeddedMariaDbConnection {
   query(sql: string): Promise<[Row[], FieldMetadata[]]>;
-  execute(
-    sql: string,
-    parameters?: readonly unknown[],
-  ): Promise<[Row[], FieldMetadata[]]>;
+  execute(sql: string, parameters?: readonly unknown[]): Promise<[Row[], FieldMetadata[]]>;
   /* The full result, for callers that need affectedRows or insertId. */
   run(sql: string, parameters?: readonly unknown[]): Promise<QueryResult>;
 

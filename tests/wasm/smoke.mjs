@@ -96,8 +96,7 @@ function freeAll() {
   allocations.length = 0;
 }
 
-const call = (name, returnType, argTypes, args) =>
-  ccall(name, returnType, argTypes, args);
+const call = (name, returnType, argTypes, args) => ccall(name, returnType, argTypes, args);
 
 /* mdb_error is { uint32 code; const char *sql_state; const char *message; },
    so 12 bytes on wasm32. */
@@ -157,10 +156,8 @@ function scalar(conn, sql) {
   if (status !== MDB_OK || !result) return null;
 
   try {
-    if (call("mdb_result_next", "number", ["number"], [result]) !== 1)
-      return null;
-    if (call("mdb_result_value_is_null", "number", ["number", "number"], [result, 0]))
-      return null;
+    if (call("mdb_result_next", "number", ["number"], [result]) !== 1) return null;
+    if (call("mdb_result_value_is_null", "number", ["number", "number"], [result, 0])) return null;
 
     const dataPtr = call("mdb_result_value_data", "number", ["number", "number"], [result, 0]);
     const length = call("mdb_result_value_length", "number", ["number", "number"], [result, 0]);
@@ -222,8 +219,14 @@ if (initStatus === MDB_OK) {
   const deadlineMs = Date.now() + 60_000;
   for (;;) {
     const poll = call("mdb_runtime_init_poll", "number", []);
-    if (poll === 1) { initStatus = MDB_OK; break; }
-    if (poll < 0) { initStatus = -poll; break; }
+    if (poll === 1) {
+      initStatus = MDB_OK;
+      break;
+    }
+    if (poll < 0) {
+      initStatus = -poll;
+      break;
+    }
     if (Date.now() > deadlineMs) {
       console.log("  FAIL initialisation did not finish within 60s");
       initStatus = MDB_ERR_BAD_STATE;
@@ -288,30 +291,48 @@ exec(
   "INSERT",
 );
 
-expectScalar(conn, "SELECT balance FROM users WHERE id=1", "10.2500",
-  "DECIMAL(20,4) round-trips exactly");
-expectScalar(conn, "SELECT HEX(payload) FROM users WHERE id=1", "000102FF",
-  "VARBINARY with embedded NUL round-trips");
-expectScalar(conn, "SELECT created_at FROM users WHERE id=1",
-  "2026-01-02 03:04:05.123456", "DATETIME(6) keeps microseconds");
+expectScalar(
+  conn,
+  "SELECT balance FROM users WHERE id=1",
+  "10.2500",
+  "DECIMAL(20,4) round-trips exactly",
+);
+expectScalar(
+  conn,
+  "SELECT HEX(payload) FROM users WHERE id=1",
+  "000102FF",
+  "VARBINARY with embedded NUL round-trips",
+);
+expectScalar(
+  conn,
+  "SELECT created_at FROM users WHERE id=1",
+  "2026-01-02 03:04:05.123456",
+  "DATETIME(6) keeps microseconds",
+);
 
 exec(conn, "START TRANSACTION", "START TRANSACTION");
 exec(conn, "UPDATE users SET balance = 99.0000 WHERE id=1");
-expectScalar(conn, "SELECT balance FROM users WHERE id=1", "99.0000",
-  "UPDATE visible inside transaction");
+expectScalar(
+  conn,
+  "SELECT balance FROM users WHERE id=1",
+  "99.0000",
+  "UPDATE visible inside transaction",
+);
 exec(conn, "ROLLBACK", "ROLLBACK");
-expectScalar(conn, "SELECT balance FROM users WHERE id=1", "10.2500",
-  "ROLLBACK restored the original value");
+expectScalar(
+  conn,
+  "SELECT balance FROM users WHERE id=1",
+  "10.2500",
+  "ROLLBACK restored the original value",
+);
 
 exec(conn, "START TRANSACTION", "START TRANSACTION (commit path)");
 exec(conn, "UPDATE users SET balance = 55.0000 WHERE id=1");
 exec(conn, "COMMIT", "COMMIT");
-expectScalar(conn, "SELECT balance FROM users WHERE id=1", "55.0000",
-  "COMMIT persisted the value");
+expectScalar(conn, "SELECT balance FROM users WHERE id=1", "55.0000", "COMMIT persisted the value");
 
 {
-  const dup =
-    "INSERT INTO users(email, created_at) VALUES ('a@example.com', NOW(6))";
+  const dup = "INSERT INTO users(email, created_at) VALUES ('a@example.com', NOW(6))";
   const { status } = query(conn, dup);
   if (status === MDB_OK) fail("duplicate key insert unexpectedly succeeded");
   else {
@@ -325,14 +346,17 @@ expectScalar(conn, "SELECT balance FROM users WHERE id=1", "55.0000",
 /* Prepared statements: bound through MariaDB's statement API, never by
    interpolating into SQL text. */
 {
-  const sql = "INSERT INTO users(email, balance, payload, created_at)" +
-    " VALUES (?, ?, ?, ?)";
+  const sql = "INSERT INTO users(email, balance, payload, created_at)" + " VALUES (?, ?, ?, ?)";
   const sqlBytes = new TextEncoder().encode(sql);
   const sqlPtr = _malloc(sqlBytes.length);
   u8().set(sqlBytes, sqlPtr);
 
-  const stmt = call("mdb_statement_prepare", "number",
-    ["number", "number", "number"], [conn, sqlPtr, sqlBytes.length]);
+  const stmt = call(
+    "mdb_statement_prepare",
+    "number",
+    ["number", "number", "number"],
+    [conn, sqlPtr, sqlBytes.length],
+  );
   _free(sqlPtr);
 
   if (!stmt) fail("mdb_statement_prepare");
@@ -347,25 +371,32 @@ expectScalar(conn, "SELECT balance FROM users WHERE id=1", "55.0000",
       const bytes = new TextEncoder().encode(text);
       const ptr = _malloc(bytes.length);
       u8().set(bytes, ptr);
-      call(fn, "number", ["number", "number", "number", "number"],
-        [stmt, index, ptr, bytes.length]);
+      call(
+        fn,
+        "number",
+        ["number", "number", "number", "number"],
+        [stmt, index, ptr, bytes.length],
+      );
       _free(ptr);
     };
 
     bindText(0, "d@example.com");
-    bindText(1, "98765.4321");            /* DECIMAL as text, never a double */
+    bindText(1, "98765.4321"); /* DECIMAL as text, never a double */
     {
       const blob = new Uint8Array([0x00, 0x01, 0x02, 0xff]);
       const ptr = _malloc(blob.length);
       u8().set(blob, ptr);
-      call("mdb_statement_bind_blob", "number",
-        ["number", "number", "number", "number"], [stmt, 2, ptr, blob.length]);
+      call(
+        "mdb_statement_bind_blob",
+        "number",
+        ["number", "number", "number", "number"],
+        [stmt, 2, ptr, blob.length],
+      );
       _free(ptr);
     }
     bindText(3, "2026-03-04 05:06:07.891011");
 
-    if (call("mdb_statement_execute", "number", ["number", "number"], [stmt, 0])
-        !== MDB_OK)
+    if (call("mdb_statement_execute", "number", ["number", "number"], [stmt, 0]) !== MDB_OK)
       fail("mdb_statement_execute");
     else ok("mdb_statement_execute (bound INSERT)");
 
@@ -383,22 +414,34 @@ expectScalar(conn, "SELECT balance FROM users WHERE id=1", "55.0000",
   MariaDB's proxied filesystem syscalls.
 */
 {
-  const sql = "INSERT INTO users(email, balance, payload, created_at)" +
-    " VALUES (?, ?, ?, ?)";
+  const sql = "INSERT INTO users(email, balance, payload, created_at)" + " VALUES (?, ?, ?, ?)";
   const sqlBytes = new TextEncoder().encode(sql);
   const sqlPtr = _malloc(sqlBytes.length);
   u8().set(sqlBytes, sqlPtr);
 
-  const submitted = call("mdb_statement_prepare_async", "number",
-    ["number", "number", "number"], [conn, sqlPtr, sqlBytes.length]);
+  const submitted = call(
+    "mdb_statement_prepare_async",
+    "number",
+    ["number", "number", "number"],
+    [conn, sqlPtr, sqlBytes.length],
+  );
 
   /* Submitting a second call while one is in flight must be refused rather
      than corrupting the protocol state on the shared MYSQL. */
-  const second = call("mdb_statement_prepare_async", "number",
-    ["number", "number", "number"], [conn, sqlPtr, sqlBytes.length]);
+  const second = call(
+    "mdb_statement_prepare_async",
+    "number",
+    ["number", "number", "number"],
+    [conn, sqlPtr, sqlBytes.length],
+  );
   if (second !== MDB_ERR_BAD_STATE)
     fail(`a second in-flight call should be refused, got ${second}`);
   else ok("a second call on a busy connection is refused");
+
+  const busyClose = call("mdb_connection_close", "number", ["number"], [conn]);
+  if (busyClose !== MDB_ERR_BAD_STATE)
+    fail(`closing a busy connection should be refused, got ${busyClose}`);
+  else ok("closing a busy connection is refused without losing its handle");
 
   _free(sqlPtr);
 
@@ -408,10 +451,20 @@ expectScalar(conn, "SELECT balance FROM users WHERE id=1", "55.0000",
     const outPtr = _malloc(4);
     u32()[outPtr >> 2] = 0;
     for (;;) {
-      const poll = call("mdb_statement_prepare_poll", "number",
-        ["number", "number"], [conn, outPtr]);
-      if (poll === 1) { stmt = u32()[outPtr >> 2]; break; }
-      if (poll < 0) { fail(`mdb_statement_prepare_poll -> ${poll}`); break; }
+      const poll = call(
+        "mdb_statement_prepare_poll",
+        "number",
+        ["number", "number"],
+        [conn, outPtr],
+      );
+      if (poll === 1) {
+        stmt = u32()[outPtr >> 2];
+        break;
+      }
+      if (poll < 0) {
+        fail(`mdb_statement_prepare_poll -> ${poll}`);
+        break;
+      }
       await new Promise((resolve) => setImmediate(resolve));
     }
     _free(outPtr);
@@ -425,8 +478,12 @@ expectScalar(conn, "SELECT balance FROM users WHERE id=1", "55.0000",
       const bytes = new TextEncoder().encode(text);
       const ptr = _malloc(bytes.length);
       u8().set(bytes, ptr);
-      call(fn, "number", ["number", "number", "number", "number"],
-        [stmt, index, ptr, bytes.length]);
+      call(
+        fn,
+        "number",
+        ["number", "number", "number", "number"],
+        [stmt, index, ptr, bytes.length],
+      );
       _free(ptr);
     };
 
@@ -436,24 +493,37 @@ expectScalar(conn, "SELECT balance FROM users WHERE id=1", "55.0000",
       const blob = new Uint8Array([0xff, 0x00, 0x10]);
       const ptr = _malloc(blob.length);
       u8().set(blob, ptr);
-      call("mdb_statement_bind_blob", "number",
-        ["number", "number", "number", "number"], [stmt, 2, ptr, blob.length]);
+      call(
+        "mdb_statement_bind_blob",
+        "number",
+        ["number", "number", "number", "number"],
+        [stmt, 2, ptr, blob.length],
+      );
       _free(ptr);
     }
     bindText(3, "2026-07-08 09:10:11.121314");
 
-    if (call("mdb_statement_execute_async", "number", ["number"], [stmt])
-        !== MDB_OK) {
+    if (call("mdb_statement_execute_async", "number", ["number"], [stmt]) !== MDB_OK) {
       fail("mdb_statement_execute_async");
     } else {
       const outPtr = _malloc(4);
       u32()[outPtr >> 2] = 0;
       let done = false;
       for (;;) {
-        const poll = call("mdb_statement_execute_poll", "number",
-          ["number", "number"], [stmt, outPtr]);
-        if (poll === 1) { done = true; break; }
-        if (poll < 0) { fail(`mdb_statement_execute_poll -> ${poll}`); break; }
+        const poll = call(
+          "mdb_statement_execute_poll",
+          "number",
+          ["number", "number"],
+          [stmt, outPtr],
+        );
+        if (poll === 1) {
+          done = true;
+          break;
+        }
+        if (poll < 0) {
+          fail(`mdb_statement_execute_poll -> ${poll}`);
+          break;
+        }
         await new Promise((resolve) => setImmediate(resolve));
       }
       const produced = u32()[outPtr >> 2];
@@ -466,22 +536,45 @@ expectScalar(conn, "SELECT balance FROM users WHERE id=1", "55.0000",
   }
 }
 
-expectScalar(conn, "SELECT balance FROM users WHERE email='e@example.com'",
-  "13579.2468", "async-bound DECIMAL stored exactly");
-expectScalar(conn, "SELECT HEX(payload) FROM users WHERE email='e@example.com'",
-  "FF0010", "async-bound binary parameter survived");
-expectScalar(conn, "SELECT created_at FROM users WHERE email='e@example.com'",
-  "2026-07-08 09:10:11.121314", "async-bound DATETIME(6) kept microseconds");
+expectScalar(
+  conn,
+  "SELECT balance FROM users WHERE email='e@example.com'",
+  "13579.2468",
+  "async-bound DECIMAL stored exactly",
+);
+expectScalar(
+  conn,
+  "SELECT HEX(payload) FROM users WHERE email='e@example.com'",
+  "FF0010",
+  "async-bound binary parameter survived",
+);
+expectScalar(
+  conn,
+  "SELECT created_at FROM users WHERE email='e@example.com'",
+  "2026-07-08 09:10:11.121314",
+  "async-bound DATETIME(6) kept microseconds",
+);
 
-expectScalar(conn, "SELECT balance FROM users WHERE email='d@example.com'",
-  "98765.4321", "bound DECIMAL stored exactly");
-expectScalar(conn, "SELECT HEX(payload) FROM users WHERE email='d@example.com'",
-  "000102FF", "bound binary parameter kept its NUL byte");
-expectScalar(conn, "SELECT created_at FROM users WHERE email='d@example.com'",
-  "2026-03-04 05:06:07.891011", "bound DATETIME(6) kept microseconds");
+expectScalar(
+  conn,
+  "SELECT balance FROM users WHERE email='d@example.com'",
+  "98765.4321",
+  "bound DECIMAL stored exactly",
+);
+expectScalar(
+  conn,
+  "SELECT HEX(payload) FROM users WHERE email='d@example.com'",
+  "000102FF",
+  "bound binary parameter kept its NUL byte",
+);
+expectScalar(
+  conn,
+  "SELECT created_at FROM users WHERE email='d@example.com'",
+  "2026-03-04 05:06:07.891011",
+  "bound DATETIME(6) kept microseconds",
+);
 
-if (call("mdb_live_statements", "number", []) !== 0)
-  fail("leaked statements");
+if (call("mdb_live_statements", "number", []) !== 0) fail("leaked statements");
 else ok("no leaked statements");
 
 if (call("mdb_connection_close", "number", ["number"], [conn]) !== MDB_OK)
@@ -496,8 +589,7 @@ else ok("mdb_connection_close");
   full five seconds and says so on stderr, which is the only place it reports.
 */
 const shutdownStarted = Date.now();
-if (call("mdb_runtime_shutdown", "number", []) !== MDB_OK)
-  fail("mdb_runtime_shutdown");
+if (call("mdb_runtime_shutdown", "number", []) !== MDB_OK) fail("mdb_runtime_shutdown");
 else ok("mdb_runtime_shutdown");
 const shutdownMs = Date.now() - shutdownStarted;
 
@@ -506,11 +598,12 @@ if (stderrLines.some((line) => line.includes("threads didn't exit")))
 else ok("every MariaDB thread exited at shutdown");
 
 /* Well under the flat 5s the leak used to cost, well over a clean shutdown. */
-if (shutdownMs >= 2500)
-  fail(`shutdown took ${shutdownMs}ms — the thread wait ran to completion`);
+if (shutdownMs >= 2500) fail(`shutdown took ${shutdownMs}ms — the thread wait ran to completion`);
 else ok(`shutdown did not wait on threads (${shutdownMs}ms)`);
 
-console.log(`\n${failures ? "FAILED" : "PASSED"} (${failures} failure${failures === 1 ? "" : "s"})`);
+console.log(
+  `\n${failures ? "FAILED" : "PASSED"} (${failures} failure${failures === 1 ? "" : "s"})`,
+);
 
 if (failures) {
   console.log("--- captured stderr ---");

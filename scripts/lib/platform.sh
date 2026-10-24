@@ -45,3 +45,12 @@ require_bison_3() {
        return 1 ;;
   esac
 }
+
+# MariaDB 11.8 folds tpool object files into libmariadbd on non-Linux targets.
+# Linux can still produce a separate archive with platform I/O dependencies.
+tpool_link_args() {
+  TPOOL_LINK_ARGS=()
+  if [ -f "$1/tpool/libtpool.a" ]; then
+    TPOOL_LINK_ARGS=("$1/tpool/libtpool.a")
+  fi
+}

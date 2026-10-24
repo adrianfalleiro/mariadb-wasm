@@ -28,8 +28,7 @@ type Inspectable = EmbeddedMariaDbServer & {
   shutdownWasClean: boolean;
   diagnostics: string;
 };
-const inspect = (server: EmbeddedMariaDbServer) =>
-  server as unknown as Inspectable;
+const inspect = (server: EmbeddedMariaDbServer) => server as unknown as Inspectable;
 
 /*
   Comfortably under the 5s the leak used to cost and far above the ~100ms a
@@ -39,71 +38,69 @@ const inspect = (server: EmbeddedMariaDbServer) =>
 const SHUTDOWN_BUDGET_MS = 2_500;
 
 describe("shutdown", () => {
-  test("drains every MariaDB thread, and does not wait to find out", async () => {
-    const server = inspect(await createEmbeddedMariaDb());
+  test(
+    "drains every MariaDB thread, and does not wait to find out",
+    { timeout: 120_000 },
+    async () => {
+      const server = inspect(await createEmbeddedMariaDb());
 
-    const connection = await server.connect();
-    await connection.query("CREATE DATABASE shutdown_db");
-    await connection.query("USE shutdown_db");
-    await connection.query(
-      "CREATE TABLE t (id INT PRIMARY KEY, v INT) ENGINE=InnoDB",
-    );
-    await connection.execute("INSERT INTO t VALUES (?, ?)", [1, 10]);
-    await connection.close();
+      const connection = await server.connect();
+      await connection.query("CREATE DATABASE shutdown_db");
+      await connection.query("USE shutdown_db");
+      await connection.query("CREATE TABLE t (id INT PRIMARY KEY, v INT) ENGINE=InnoDB");
+      await connection.execute("INSERT INTO t VALUES (?, ?)", [1, 10]);
+      await connection.close();
 
-    const started = Date.now();
-    await server.close();
-    const elapsed = Date.now() - started;
+      const started = Date.now();
+      await server.close();
+      const elapsed = Date.now() - started;
 
-    assert.equal(
-      server.shutdownWasClean,
-      true,
-      "MariaDB reported threads that never called my_thread_end:\n" +
-        server.diagnostics,
-    );
-    assert.ok(
-      elapsed < SHUTDOWN_BUDGET_MS,
-      `shutdown took ${elapsed}ms, over the ${SHUTDOWN_BUDGET_MS}ms budget — ` +
-        "the thread wait is running to completion again",
-    );
-  }, { timeout: 120_000 });
+      assert.equal(
+        server.shutdownWasClean,
+        true,
+        "MariaDB reported threads that never called my_thread_end:\n" + server.diagnostics,
+      );
+      assert.ok(
+        elapsed < SHUTDOWN_BUDGET_MS,
+        `shutdown took ${elapsed}ms, over the ${SHUTDOWN_BUDGET_MS}ms budget — ` +
+          "the thread wait is running to completion again",
+      );
+    },
+  );
 
-  test("stays clean after the async statement path has been used", async () => {
-    /* prepare and execute each run on their own thread now. Both must pair
-       mysql_thread_init with mysql_thread_end, or they leak exactly the way
-       initialisation did — and a query-per-test suite would leak one per
-       statement rather than one per server. */
-    const server = inspect(await createEmbeddedMariaDb());
+  test(
+    "stays clean after the async statement path has been used",
+    { timeout: 120_000 },
+    async () => {
+      /* The reusable connection worker must unregister when closed, including
+       after repeated prepare/execute calls. */
+      const server = inspect(await createEmbeddedMariaDb());
 
-    const connection = await server.connect();
-    await connection.query("CREATE DATABASE stmt_db");
-    await connection.query("USE stmt_db");
-    await connection.query(
-      "CREATE TABLE t (id INT PRIMARY KEY, v VARCHAR(32)) ENGINE=InnoDB",
-    );
+      const connection = await server.connect();
+      await connection.query("CREATE DATABASE stmt_db");
+      await connection.query("USE stmt_db");
+      await connection.query("CREATE TABLE t (id INT PRIMARY KEY, v VARCHAR(32)) ENGINE=InnoDB");
 
-    for (let i = 0; i < 50; i++)
-      await connection.execute("INSERT INTO t VALUES (?, ?)", [i, `row-${i}`]);
+      for (let i = 0; i < 50; i++)
+        await connection.execute("INSERT INTO t VALUES (?, ?)", [i, `row-${i}`]);
 
-    const [rows] = await connection.execute(
-      "SELECT COUNT(*) AS n FROM t WHERE id < ?",
-      [50],
-    );
-    assert.equal(rows[0].n, 50n);
-    await connection.close();
+      const [rows] = await connection.execute("SELECT COUNT(*) AS n FROM t WHERE id < ?", [50]);
+      assert.equal(rows[0].n, 50n);
+      await connection.close();
 
-    const started = Date.now();
-    await server.close();
-    const elapsed = Date.now() - started;
+      const started = Date.now();
+      await server.close();
+      const elapsed = Date.now() - started;
 
-    assert.equal(
-      server.shutdownWasClean,
-      true,
-      "a statement worker thread did not unregister:\n" + server.diagnostics,
-    );
-    assert.ok(
-      elapsed < SHUTDOWN_BUDGET_MS,
-      `shutdown took ${elapsed}ms after 51 prepared statements`,
-    );
-  }, { timeout: 120_000 });
+      assert.equal(
+        server.shutdownWasClean,
+        true,
+        "a statement worker thread did not unregister:\n" + server.diagnostics,
+      );
+      assert.ok(
+        elapsed < SHUTDOWN_BUDGET_MS,
+        `shutdown took ${elapsed}ms after 51 prepared statements`,
+      );
+    },
+  );
 });

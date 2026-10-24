@@ -1,9 +1,5 @@
 /* Connection: query, prepared execute, transactions. */
-import {
-  decodeValue,
-  describeColumn,
-  encodeParameter,
-} from "./result-decoder.ts";
+import { decodeValue, describeColumn, encodeParameter } from "./result-decoder.ts";
 import { MariaDbEmbeddedStateError } from "./errors.ts";
 import type {
   ConversionOptions,
@@ -19,6 +15,8 @@ export class Connection implements EmbeddedMariaDbConnection {
   #handle: number;
   #conversion: Required<ConversionOptions>;
   #closed = false;
+  #tail: Promise<unknown> = Promise.resolve();
+  #closePromise?: Promise<void>;
   #onClose: (connection: Connection) => void;
 
   constructor(
@@ -34,8 +32,7 @@ export class Connection implements EmbeddedMariaDbConnection {
   }
 
   #assertOpen() {
-    if (this.#closed)
-      throw new MariaDbEmbeddedStateError("this connection is closed");
+    if (this.#closed) throw new MariaDbEmbeddedStateError("this connection is closed");
   }
 
   async query(sql: string): Promise<[Row[], FieldMetadata[]]> {
@@ -51,32 +48,25 @@ export class Connection implements EmbeddedMariaDbConnection {
     return [result.rows, result.fields];
   }
 
-  async run(
-    sql: string,
-    parameters?: readonly unknown[],
-  ): Promise<QueryResult> {
+  async run(sql: string, parameters?: readonly unknown[]): Promise<QueryResult> {
     this.#assertOpen();
 
-    /* No parameters means no reason to prepare. Beyond the round trip, the
-       text protocol accepts multi-statement and utility SQL that the
-       statement protocol rejects, so preparing unconditionally would narrow
-       what query() can run. */
-    if (!parameters || parameters.length === 0) return await this.#runText(sql);
-    return await this.#runPrepared(sql, parameters);
+    // Serialize one connection, while independent connections remain concurrent.
+    const operation = this.#tail.then(() =>
+      parameters === undefined ? this.#runText(sql) : this.#runPrepared(sql, parameters),
+    );
+    this.#tail = operation.catch(() => {});
+    return operation;
   }
 
   async #runText(sql: string): Promise<QueryResult> {
-    const resultHandle = await this.#runtime.connectionQueryAsync(
-      this.#handle,
-      sql,
-    );
+    const resultHandle = await this.#runtime.connectionQueryAsync(this.#handle, sql);
 
     const affectedRows = this.#runtime.affectedRows(this.#handle);
     const insertId = BigInt(this.#runtime.insertId(this.#handle));
     const warningCount = this.#runtime.warningCount(this.#handle);
 
-    if (!resultHandle)
-      return { rows: [], fields: [], affectedRows, insertId, warningCount };
+    if (!resultHandle) return { rows: [], fields: [], affectedRows, insertId, warningCount };
 
     try {
       const { rows, fields } = this.#drain(resultHandle, sql);
@@ -86,14 +76,8 @@ export class Connection implements EmbeddedMariaDbConnection {
     }
   }
 
-  async #runPrepared(
-    sql: string,
-    parameters: readonly unknown[],
-  ): Promise<QueryResult> {
-    const statement = await this.#runtime.statementPrepareAsync(
-      this.#handle,
-      sql,
-    );
+  async #runPrepared(sql: string, parameters: readonly unknown[]): Promise<QueryResult> {
+    const statement = await this.#runtime.statementPrepareAsync(this.#handle, sql);
 
     try {
       const expected = this.#runtime.statementParamCount(statement);
@@ -128,8 +112,7 @@ export class Connection implements EmbeddedMariaDbConnection {
       const insertId = BigInt(this.#runtime.statementInsertId(statement));
       const warningCount = this.#runtime.warningCount(this.#handle);
 
-      if (!resultHandle)
-        return { rows: [], fields: [], affectedRows, insertId, warningCount };
+      if (!resultHandle) return { rows: [], fields: [], affectedRows, insertId, warningCount };
 
       try {
         const { rows, fields } = this.#drain(resultHandle, sql);
@@ -160,8 +143,7 @@ export class Connection implements EmbeddedMariaDbConnection {
     for (;;) {
       const status = this.#runtime.resultNext(resultHandle);
       if (status === 0) break;
-      if (status < 0)
-        throw this.#runtime.connectionError(this.#handle, sql);
+      if (status < 0) throw this.#runtime.connectionError(this.#handle, sql);
 
       const row: Row = {};
       for (let i = 0; i < columnCount; i++) {
@@ -189,10 +171,13 @@ export class Connection implements EmbeddedMariaDbConnection {
   }
 
   async close(): Promise<void> {
-    if (this.#closed) return;  /* idempotent, like the ABI beneath it */
+    if (this.#closePromise) return this.#closePromise;
     this.#closed = true;
-    this.#runtime.connectionClose(this.#handle);
-    this.#onClose(this);
+    this.#closePromise = this.#tail.then(() => {
+      this.#runtime.connectionClose(this.#handle);
+      this.#onClose(this);
+    });
+    return this.#closePromise;
   }
 
   get closed(): boolean {

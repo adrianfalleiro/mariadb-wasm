@@ -10,6 +10,7 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 source "$ROOT/scripts/lib/platform.sh"
 
 BUILD="$ROOT/build/native"
+tpool_link_args "$BUILD"
 # libmariadbd.a is NOT self-contained: libmysqld/CMakeLists.txt attaches tpool
 # to sql_embedded with LINK_PRIVATE, so MERGE_LIBRARIES never folds it in and
 # every consumer has to supply it. InnoDB's whole background-task layer
@@ -32,7 +33,7 @@ fi
   -I "$BUILD/include" \
   "$ROOT/tests/native/smoke.c" \
   "$LIB" \
-  "$BUILD/tpool/libtpool.a" \
+  ${TPOOL_LINK_ARGS[@]+"${TPOOL_LINK_ARGS[@]}"} \
   "${HOST_LINK_LIBS[@]}" \
   -o "$BIN"
 

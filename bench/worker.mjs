@@ -9,17 +9,19 @@
 */
 import { parentPort, workerData } from "node:worker_threads";
 
-import { createEmbedded, createServer } from "./adapters.mjs";
+import { createEmbedded, createServer, createShared } from "./adapters.mjs";
 import { runTest } from "./workload.mjs";
 
-const { backend, root, port, index, tests } = workerData;
+const { backend, root, port, index, tests, clientPort } = workerData;
 
 const started = performance.now();
 
 const target =
   backend === "embedded"
     ? await createEmbedded({ root })
-    : await createServer({ port, database: `bench_w${index}` });
+    : backend === "shared"
+      ? await createShared({ root, clientPort })
+      : await createServer({ port, database: `bench_w${index}` });
 
 const ready = performance.now();
 

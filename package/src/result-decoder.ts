@@ -17,6 +17,7 @@ import {
 const decoder = new TextDecoder("utf-8", { fatal: false });
 
 export function describeColumn(raw: {
+  json?: boolean;
   name: string;
   type: number;
   flags: number;
@@ -24,6 +25,7 @@ export function describeColumn(raw: {
   charsetnr: number;
 }): FieldMetadata {
   return {
+    ...(raw.json ? { json: true } : {}),
     name: raw.name,
     type: raw.type,
     flags: raw.flags,
@@ -70,11 +72,14 @@ export function decodeValue(
     arbitrary bytes into replacement characters. BIT is bytes too.
   */
   if (field.type === FieldType.BIT) return bytes;
-  if (field.binary && (BLOB_TYPES.has(field.type) ||
+  if (
+    field.binary &&
+    (BLOB_TYPES.has(field.type) ||
       field.type === FieldType.STRING ||
       field.type === FieldType.VAR_STRING ||
       field.type === FieldType.VARCHAR ||
-      field.type === FieldType.GEOMETRY)) {
+      field.type === FieldType.GEOMETRY)
+  ) {
     return bytes;
   }
 
@@ -129,8 +134,9 @@ export function decodeValue(
   silently becoming 1899 or Invalid Date.
 */
 function toDate(text: string): Date | string {
-  const match =
-    /^(\d{4})-(\d{2})-(\d{2})(?:[ T](\d{2}):(\d{2}):(\d{2})(?:\.(\d{1,6}))?)?$/.exec(text);
+  const match = /^(\d{4})-(\d{2})-(\d{2})(?:[ T](\d{2}):(\d{2}):(\d{2})(?:\.(\d{1,6}))?)?$/.exec(
+    text,
+  );
   if (!match) return text;
 
   const [, year, month, day, hour, minute, second, fraction] = match;
@@ -159,41 +165,30 @@ export interface EncodedParameter {
 }
 
 /*
-  Parameter encoding. Integers go as text so the server parses them in the
-  column's own type — exact for BIGINT, and the same path the text protocol
-  takes. Only genuinely fractional numbers are bound as doubles, where the
-  double is already the value's true precision.
+  JavaScript numbers bind as doubles, preserving their numeric SQL type.
+  BigInt and decimal strings bind as text to preserve precision beyond 2^53.
 */
 export function encodeParameter(value: unknown): EncodedParameter {
   if (value === null || value === undefined) return { kind: "null" };
 
-  if (typeof value === "bigint")
-    return { kind: "text", bytes: encoder.encode(value.toString()) };
+  if (typeof value === "bigint") return { kind: "text", bytes: encoder.encode(value.toString()) };
 
   if (typeof value === "number") {
     if (!Number.isFinite(value))
-      throw new TypeError(
-        `cannot bind ${value}: MariaDB has no representation for it`,
-      );
-    if (Number.isInteger(value))
-      return { kind: "text", bytes: encoder.encode(value.toFixed(0)) };
+      throw new TypeError(`cannot bind ${value}: MariaDB has no representation for it`);
     return { kind: "double", value };
   }
 
-  if (typeof value === "boolean")
-    return { kind: "text", bytes: encoder.encode(value ? "1" : "0") };
+  if (typeof value === "boolean") return { kind: "double", value: value ? 1 : 0 };
 
-  if (typeof value === "string")
-    return { kind: "text", bytes: encoder.encode(value) };
+  if (typeof value === "string") return { kind: "text", bytes: encoder.encode(value) };
 
   if (value instanceof Uint8Array) return { kind: "binary", bytes: value };
 
-  if (value instanceof ArrayBuffer)
-    return { kind: "binary", bytes: new Uint8Array(value) };
+  if (value instanceof ArrayBuffer) return { kind: "binary", bytes: new Uint8Array(value) };
 
   if (value instanceof Date) {
-    if (Number.isNaN(value.getTime()))
-      throw new TypeError("cannot bind an Invalid Date");
+    if (Number.isNaN(value.getTime())) throw new TypeError("cannot bind an Invalid Date");
     /* UTC, matching how dateMode: "date" decodes, so a value read back and
        written again is unchanged. Microseconds are not representable in a JS
        Date, so millisecond precision is the honest limit here. */
@@ -204,14 +199,10 @@ export function encodeParameter(value: unknown): EncodedParameter {
     };
   }
 
-  throw new TypeError(
-    `cannot bind a value of type ${Object.prototype.toString.call(value)}`,
-  );
+  throw new TypeError(`cannot bind a value of type ${Object.prototype.toString.call(value)}`);
 }
 
-export function resolveConversion(
-  options: ConversionOptions,
-): Required<ConversionOptions> {
+export function resolveConversion(options: ConversionOptions): Required<ConversionOptions> {
   return {
     bigIntMode: options.bigIntMode ?? "bigint",
     decimalMode: options.decimalMode ?? "string",

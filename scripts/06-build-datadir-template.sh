@@ -14,6 +14,7 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 source "$ROOT/scripts/lib/platform.sh"
 
 BUILD="$ROOT/build/native"
+tpool_link_args "$BUILD"
 LIB="$BUILD/libmysqld/libmariadbd.a"
 TOOL="$BUILD/bootstrap-datadir"
 STAGE="$BUILD/datadir-template"
@@ -49,7 +50,7 @@ fi
   "$ROOT/native/src/result.cc" \
   "$ROOT/native/src/statement.cc" \
   "$ROOT/tools/bootstrap-datadir.c" \
-  "$LIB" "$BUILD/tpool/libtpool.a" \
+  "$LIB" ${TPOOL_LINK_ARGS[@]+"${TPOOL_LINK_ARGS[@]}"} \
   "${HOST_LINK_LIBS[@]}" \
   -o "$TOOL"
 

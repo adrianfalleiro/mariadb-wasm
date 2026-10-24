@@ -1,6 +1,4 @@
 /* Server lifecycle: one initialised MariaDB runtime per wasm instance. */
-import fs from "node:fs";
-import path from "node:path";
 
 import { Connection } from "./connection.ts";
 import { MariaDbEmbeddedStateError } from "./errors.ts";
@@ -37,6 +35,9 @@ function defaultServerOptions(datadir: string): string[] {
     "--performance-schema=OFF",
     "--max-connections=20",
     "--innodb-buffer-pool-size=16M",
+    /* Small ephemeral transactions need less redo buffering and purge concurrency. */
+    "--innodb-log-buffer-size=1M",
+    "--innodb-purge-threads=1",
     /*
       MariaDB sizes these two for a dedicated database host: 128 MB each by
       default, which together account for ~290 MB of the wasm heap before a
@@ -61,6 +62,9 @@ function defaultServerOptions(datadir: string): string[] {
     "--innodb-log-file-size=4M",
     "--innodb-data-file-path=ibdata1:1M:autoextend",
     "--innodb-undo-tablespaces=0",
+    // MEMFS reserves real RAM for file capacity; grow small fixtures incrementally.
+    "--innodb-autoextend-increment=1",
+    "--innodb-temp-data-file-path=ibtmp1:1M:autoextend",
     `--datadir=${datadir}`,
     "--lc-messages-dir=/mariadb/share",
     "--character-sets-dir=/mariadb/charsets",
@@ -72,6 +76,7 @@ class Server implements EmbeddedMariaDbServer {
   #templateApplied = false;
   #state: RuntimeState = "UNINITIALIZED";
   #connections = new Set<Connection>();
+  #closePromise?: Promise<void>;
   #conversion: Required<ConversionOptions>;
   #options: EmbeddedMariaDbOptions;
   #datadir: string;
@@ -95,16 +100,11 @@ class Server implements EmbeddedMariaDbServer {
 
   async start(): Promise<void> {
     if (this.#state !== "UNINITIALIZED")
-      throw new MariaDbEmbeddedStateError(
-        `cannot start a server in state ${this.#state}`,
-      );
+      throw new MariaDbEmbeddedStateError(`cannot start a server in state ${this.#state}`);
 
     this.#state = "INITIALIZING";
     try {
-      const args = [
-        ...defaultServerOptions(this.#datadir),
-        ...(this.#options.serverOptions ?? []),
-      ];
+      const args = [...defaultServerOptions(this.#datadir), ...(this.#options.serverOptions ?? [])];
       await this.#runtime.initAsync(args);
       this.#state = "READY";
       await this.#createDeferredSystemTables();
@@ -127,17 +127,12 @@ class Server implements EmbeddedMariaDbServer {
   async #createDeferredSystemTables(): Promise<void> {
     if (!this.#templateApplied) return;
 
-    const ddlPath = path.join(
-      this.#runtime.distDir,
-      "datadir-template",
-      DEFERRED_DDL_FILE,
-    );
-    if (!fs.existsSync(ddlPath)) return;
+    const ddl = this.#runtime.deferredDDL();
+    if (!ddl) return;
 
     const connection = await this.connect({ database: "mysql" });
     try {
-      for (const statement of fs
-        .readFileSync(ddlPath, "utf8")
+      for (const statement of ddl
         .split(";\n")
         .map((s) => s.trim())
         .filter(Boolean)) {
@@ -148,23 +143,24 @@ class Server implements EmbeddedMariaDbServer {
     }
   }
 
-  async connect(
-    options: { database?: string } = {},
-  ): Promise<EmbeddedMariaDbConnection> {
+  async connect(options: { database?: string } = {}): Promise<EmbeddedMariaDbConnection> {
     if (this.#state !== "READY")
-      throw new MariaDbEmbeddedStateError(
-        `cannot connect to a server in state ${this.#state}`,
-      );
+      throw new MariaDbEmbeddedStateError(`cannot connect to a server in state ${this.#state}`);
 
-    const handle = this.#runtime.connectionOpen(options.database);
-    const connection = new Connection(
-      this.#runtime,
-      handle,
-      this.#conversion,
-      (closed) => this.#connections.delete(closed),
+    const handle = this.#runtime.connectionOpen();
+    const connection = new Connection(this.#runtime, handle, this.#conversion, (closed) =>
+      this.#connections.delete(closed),
     );
     this.#connections.add(connection);
-    return connection;
+    try {
+      // Embedded mysql_real_connect loses the error detail on a missing schema.
+      // USE goes through the asynchronous query path and preserves its SQLSTATE.
+      if (options.database) await connection.run(`USE \`${options.database.replace(/`/g, "``")}\``);
+      return connection;
+    } catch (error) {
+      await connection.close();
+      throw error;
+    }
   }
 
   /*
@@ -179,17 +175,13 @@ class Server implements EmbeddedMariaDbServer {
   */
   async reset(): Promise<void> {
     if (this.#state !== "READY")
-      throw new MariaDbEmbeddedStateError(
-        `cannot reset a server in state ${this.#state}`,
-      );
+      throw new MariaDbEmbeddedStateError(`cannot reset a server in state ${this.#state}`);
 
     for (const connection of [...this.#connections]) await connection.close();
 
     const connection = await this.connect();
     try {
-      const [rows] = await connection.query(
-        "SELECT SCHEMA_NAME FROM information_schema.SCHEMATA",
-      );
+      const [rows] = await connection.query("SELECT SCHEMA_NAME FROM information_schema.SCHEMATA");
       for (const row of rows) {
         const name = String(row.SCHEMA_NAME);
         if (RESERVED_SCHEMAS.has(name.toLowerCase())) continue;
@@ -202,9 +194,11 @@ class Server implements EmbeddedMariaDbServer {
     }
   }
 
-  async close(): Promise<void> {
-    if (this.#state === "CLOSED") return;  /* idempotent */
+  close(): Promise<void> {
+    return (this.#closePromise ??= this.#shutdown());
+  }
 
+  async #shutdown(): Promise<void> {
     this.#state = "SHUTTING_DOWN";
     for (const connection of [...this.#connections]) {
       try {
@@ -214,16 +208,12 @@ class Server implements EmbeddedMariaDbServer {
       }
     }
 
-    this.#runtime.shutdown();
-
-    /*
-      Emscripten's pthread workers are Node worker_threads and keep the event
-      loop alive on their own. Without this a test run finishes and Node
-      simply never exits — criterion 3.2.9, and the reason process.exit() is
-      not an acceptable substitute.
-    */
-    this.#runtime.terminateThreads();
-    this.#state = "CLOSED";
+    try {
+      await this.#runtime.shutdown();
+    } finally {
+      this.#runtime.terminateThreads();
+      this.#state = "CLOSED";
+    }
   }
 
   /* Exposed for the leak assertions in the test suite. */
@@ -251,12 +241,7 @@ class Server implements EmbeddedMariaDbServer {
 }
 
 /* Schemas MariaDB owns. Dropping any of these breaks the running server. */
-const RESERVED_SCHEMAS = new Set([
-  "mysql",
-  "information_schema",
-  "performance_schema",
-  "sys",
-]);
+const RESERVED_SCHEMAS = new Set(["mysql", "information_schema", "performance_schema", "sys"]);
 
 export async function createEmbeddedMariaDb(
   options: EmbeddedMariaDbOptions = {},
@@ -266,27 +251,32 @@ export async function createEmbeddedMariaDb(
     debug: options.debug,
   });
 
-  const storage: StorageMode = options.storage ?? { type: "memory" };
-  const datadir = `/runtime/instance-${instanceCounter++}`;
+  try {
+    const storage: StorageMode = options.storage ?? { type: "memory" };
+    const datadir = `/runtime/instance-${instanceCounter++}`;
 
-  let templateApplied = false;
+    let templateApplied = false;
 
-  if (storage.type === "node") {
-    /* Host-backed, for debugging and restart tests. NODEFS gives real files
+    if (storage.type === "node") {
+      /* Host-backed, for debugging and restart tests. NODEFS gives real files
        with real persistence; MEMFS is gone the moment the instance is. The
        caller owns the directory, so the template is not written into it. */
-    runtime.mountNodeFs(storage.directory, datadir);
-  } else {
-    runtime.mkdirTree(datadir);
-    templateApplied = runtime.copyTemplate(
-      path.join(runtime.distDir, "datadir-template"),
-      datadir,
-      /* Not a MariaDB file - it is replayed after startup instead. */
-      [DEFERRED_DDL_FILE],
-    );
-  }
+      runtime.mountNodeFs(storage.directory, datadir);
+    } else {
+      runtime.mkdirTree(datadir);
+      templateApplied = runtime.copyTemplate(
+        runtime.templateDirectory(),
+        datadir,
+        /* Not a MariaDB file - it is replayed after startup instead. */
+        [DEFERRED_DDL_FILE],
+      );
+    }
 
-  const server = new Server(runtime, options, datadir, templateApplied);
-  await server.start();
-  return server;
+    const server = new Server(runtime, options, datadir, templateApplied);
+    await server.start();
+    return server;
+  } catch (error) {
+    runtime.terminateThreads();
+    throw error;
+  }
 }

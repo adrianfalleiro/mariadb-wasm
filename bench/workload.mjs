@@ -76,7 +76,7 @@ export const SEED = [
 ];
 
 /*
-  One test. 12 statements: writes across four tables with foreign keys, an
+  One test. 13 statements: writes across four tables with foreign keys, an
   indexed read, a join, an aggregate, an update and a cascading delete.
 
   `db` is the adapter interface: query(sql), execute(sql, params), begin(),
@@ -93,28 +93,28 @@ export async function runTest(db, n) {
       [email, `User ${n}`, "10.2500", "2026-01-02 03:04:05.123456"],
     );
 
-    const [found] = await db.execute(
-      "SELECT id, balance FROM users WHERE email = ?",
-      [email],
-    );
+    const [found] = await db.execute("SELECT id, balance FROM users WHERE email = ?", [email]);
     const userId = found[0].id;
 
-    await db.execute(
-      "INSERT INTO memberships(user_id, org_id, role) VALUES (?, 1, ?)",
-      [userId, "admin"],
-    );
+    await db.execute("INSERT INTO memberships(user_id, org_id, role) VALUES (?, 1, ?)", [
+      userId,
+      "admin",
+    ]);
 
     for (let i = 0; i < 3; i++) {
-      await db.execute(
-        "INSERT INTO events(user_id, kind, payload, at) VALUES (?, ?, ?, ?)",
-        [userId, `kind.${i}`, Buffer.from([0, 1, 2, 255]), "2026-01-02 03:04:05.000001"],
-      );
+      await db.execute("INSERT INTO events(user_id, kind, payload, at) VALUES (?, ?, ?, ?)", [
+        userId,
+        `kind.${i}`,
+        Buffer.from([0, 1, 2, 255]),
+        "2026-01-02 03:04:05.000001",
+      ]);
     }
 
-    await db.execute(
-      "INSERT INTO sessions(token, user_id, expires_at) VALUES (?, ?, ?)",
-      [String(n).padStart(43, "t"), userId, "2026-02-01 00:00:00"],
-    );
+    await db.execute("INSERT INTO sessions(token, user_id, expires_at) VALUES (?, ?, ?)", [
+      String(n).padStart(43, "t"),
+      userId,
+      "2026-02-01 00:00:00",
+    ]);
 
     /* A join with an aggregate — the shape most app queries actually take. */
     await db.execute(
@@ -126,10 +126,7 @@ export async function runTest(db, n) {
       [userId],
     );
 
-    await db.execute(
-      "UPDATE users SET balance = balance + ? WHERE id = ?",
-      ["5.5000", userId],
-    );
+    await db.execute("UPDATE users SET balance = balance + ? WHERE id = ?", ["5.5000", userId]);
 
     await db.execute("SELECT COUNT(*) AS n FROM events WHERE user_id = ?", [userId]);
 
@@ -142,4 +139,4 @@ export async function runTest(db, n) {
   }
 }
 
-export const STATEMENTS_PER_TEST = 12;
+export const STATEMENTS_PER_TEST = 13;

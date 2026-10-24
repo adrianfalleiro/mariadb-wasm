@@ -14,6 +14,10 @@ source "$ROOT/emsdk/emsdk_env.sh" >/dev/null 2>&1
 TARGET="${1:-mysqlserver}"
 cd "$ROOT/build/wasm"
 
+# Generate first: rewriting the generated files leaves native builds untouched.
+ninja sql/yy_mariadb.cc sql/yy_oracle.cc || exit $?
+python3 "$ROOT/scripts/split-wasm-parser.py" sql/yy_mariadb.cc sql/yy_oracle.cc || exit $?
+
 ninja -k 0 "$TARGET"
 STATUS=$?
 

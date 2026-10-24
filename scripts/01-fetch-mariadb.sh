@@ -3,7 +3,7 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT"
 
-TAG="${MARIADB_TAG:-mariadb-11.4.4}"
+TAG="${MARIADB_TAG:-mariadb-11.8.9}"
 
 if [ ! -d mariadb/.git ]; then
   git clone --depth 1 --branch "$TAG" https://github.com/MariaDB/server.git mariadb

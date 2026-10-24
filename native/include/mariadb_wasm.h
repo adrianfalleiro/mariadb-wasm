@@ -107,6 +107,9 @@ int mdb_runtime_init_poll(void);
 void mdb_runtime_set_shutdown_wait_seconds(uint32_t seconds);
 
 int mdb_runtime_shutdown(void);
+/* Non-blocking shutdown; poll returns 0 pending, 1 success, or -mdb_status. */
+int mdb_runtime_shutdown_async(void);
+int mdb_runtime_shutdown_poll(void);
 
 /* 1 once init has succeeded and shutdown has not run. */
 int mdb_runtime_is_ready(void);
@@ -203,6 +206,7 @@ int mdb_result_value_is_null(mdb_result_handle result, uint32_t column);
 /* Column metadata is valid for the lifetime of the result handle. */
 const char *mdb_result_column_name(mdb_result_handle result, uint32_t column);
 uint32_t mdb_result_column_type(mdb_result_handle result, uint32_t column);
+int mdb_result_column_is_json(mdb_result_handle result, uint32_t column);
 uint32_t mdb_result_column_flags(mdb_result_handle result, uint32_t column);
 uint32_t mdb_result_column_decimals(mdb_result_handle result, uint32_t column);
 uint32_t mdb_result_column_charsetnr(mdb_result_handle result, uint32_t column);
