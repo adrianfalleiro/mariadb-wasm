@@ -36,7 +36,6 @@
     "test:memory": "node --test test/memory.test.ts ../tests/wasm/memory.test.mjs",
     "build:package": "node ../scripts/build-package.mjs",
     "pack:npm": "npm run build:package && npm pack ../build/npm --pack-destination ../build",
-    "publish:npm": "npm publish ../build/npm --access public",
     "test:package": "node ../scripts/test-package.mjs"
   },
   "dependencies": {

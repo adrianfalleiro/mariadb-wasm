@@ -5,9 +5,9 @@ test suite can run real MariaDB — InnoDB, transactions, foreign keys, the
 actual optimizer — with no daemon, no port, no socket and no Docker.
 
 ```ts
-import { createEmbeddedMariaDb } from "@adrianfalleiro/mariadb-wasm";
+import { createServer } from "@adrianfalleiro/mariadb-wasm";
 
-const server = await createEmbeddedMariaDb({ storage: { type: "memory" } });
+const server = await createServer({ storage: { type: "memory" } });
 const connection = await server.connect();
 
 await connection.query(`
@@ -118,11 +118,15 @@ To prepare a release after building both engine targets:
 npm run build:browser --prefix package
 npm run pack:npm --prefix package
 npm run test:package --prefix package
-npm run publish:npm --prefix package
 ```
 
 The source-development package stays private to prevent accidentally publishing
-an incomplete checkout; publishing uses the self-contained `build/npm` directory.
+an incomplete checkout; publishing uses the self-contained `build/npm` directory. Publication runs only through the GitHub Actions **Publish npm**
+workflow, which builds and tests both targets on a GitHub-hosted runner. For
+the first release, configure the repository secret `NPM_TOKEN` with an npm
+granular write token permitted to publish this scope (bypass 2FA enabled).
+Afterward, configure an npm trusted publisher for user `adrianfalleiro`,
+repository `mariadb-wasm`, workflow `publish.yml`, and remove the token.
 Bump `package/package.json` and its lockfile for each release.
 
 ## Build

@@ -7,14 +7,16 @@ name: ci
 
 on:
   push:
-    branches: [main]
+    branches: [main, port/wasm-embedded]
   pull_request:
+  workflow_call:
+  workflow_dispatch:
 
 # build/ and the in-place-patched mariadb/ checkout are shared mutable state
 # with no locking. Two jobs on one workspace corrupt each other in ways that
 # surface as impossible compiler errors, so overlapping runs are cancelled.
 concurrency:
-  group: ci-${{ github.ref }}
+  group: build-${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:
@@ -37,7 +39,10 @@ jobs:
 
       - uses: actions/setup-node@v4
         with:
-          node-version: '24'
+          node-version: "24"
+
+      - name: Install package dependencies
+        run: npm ci --prefix package
 
       # Pinned, not "latest": the emsdk version is part of the build identity
       # and is recorded in the manifest.
@@ -153,7 +158,32 @@ jobs:
         run: bash scripts/13-run-differential.sh
 
       - name: Package test suite
-        run: cd package && node --test 'test/*.test.ts'
+        run: |
+          npm run typecheck --prefix package
+          npm test --prefix package
+          npm run test:memory --prefix package
+
+      - name: Build browser runtime
+        run: |
+          bash scripts/05-link-wasm-module.sh release browser
+          npm run build:browser --prefix package
+
+      - name: Install test browser
+        run: cd package && npx playwright install --with-deps chromium
+
+      - name: Test browser workers
+        run: npm run test:browser --prefix package
+
+      - name: Build and test npm package
+        run: |
+          npm run pack:npm --prefix package
+          npm run test:package --prefix package
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: npm-package
+          path: build/adrianfalleiro-mariadb-wasm-*.tgz
+          if-no-files-found: error
 
       - name: Benchmarks
         run: node tests/wasm/bench.mjs
