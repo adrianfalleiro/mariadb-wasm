@@ -28,7 +28,8 @@ case "$(uname -s)" in
     ;;
   *)
     HOST_CMAKE_ARGS=()
-    HOST_LINK_LIBS=(-lresolv -ldl)
+    # MariaDB's ENCRYPT() uses crypt(), provided separately from glibc.
+    HOST_LINK_LIBS=(-lresolv -ldl -lcrypt)
     ;;
 esac
 
