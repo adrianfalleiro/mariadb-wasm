@@ -159,10 +159,8 @@ Separate schemas provide test isolation, not a security boundary: SQL can
 reference other schemas, and server settings and resource limits are shared.
 Use separate engines when tests need independent server state.
 
-## Compatibility and limits
+## Runtime limits
 
-- **MariaDB semantics.** This runs MariaDB, not MySQL 8.4. Collations, JSON types,
-  DDL and some expressions can differ. Validate MySQL-specific behavior against MySQL.
 - **Partial driver compatibility.** No built-in pools, `.promise()` wrapper,
   streaming/backpressure, prepared-statement objects, named placeholders or
   multiple result sets. Unknown connection options are rejected.
