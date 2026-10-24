@@ -123,10 +123,17 @@ npm run test:package --prefix package
 The source-development package stays private to prevent accidentally publishing
 an incomplete checkout; publishing uses the self-contained `build/npm` directory. Publication runs only through the GitHub Actions **Publish npm**
 workflow, which builds and tests both targets on a GitHub-hosted runner. For
-the first release, configure the repository secret `NPM_TOKEN` with an npm
-granular write token permitted to publish this scope (bypass 2FA enabled).
-Afterward, configure an npm trusted publisher for user `adrianfalleiro`,
-repository `mariadb-wasm`, workflow `publish.yml`, and remove the token.
+publishing, configure an npm trusted publisher with:
+
+- GitHub user: `adrianfalleiro`
+- Repository: `mariadb-wasm`
+- Workflow: `publish.yml`
+- Environment: leave empty
+- Permission: allow direct publishing
+
+The workflow uses GitHub OIDC (`id-token: write`) and has no npm token secret.
+npm requires the package to exist before this trust relationship can be configured;
+an unpublished package needs a separate bootstrap step first.
 Bump `package/package.json` and its lockfile for each release.
 
 ## Build

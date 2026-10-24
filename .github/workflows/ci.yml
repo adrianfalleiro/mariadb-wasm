@@ -31,7 +31,7 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
-            bison ninja-build cmake libncurses-dev
+            bison ninja-build cmake libncurses-dev libgnutls28-dev
           # Sanity-check the two host assumptions the scripts make. c++ is g++
           # here and clang++ on macOS; bison must be 3.x for the SQL parser.
           c++ --version | head -1
