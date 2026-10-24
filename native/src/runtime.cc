@@ -8,6 +8,7 @@
   MariaDB patch is needed.
 */
 extern "C" unsigned int my_thread_end_wait_time;
+void ha_pre_shutdown();
 
 #include <atomic>
 #include <cstring>
@@ -162,6 +163,7 @@ int mdb_runtime_shutdown(void) {
   mdb::connections().drain().clear();
 
   mdb::set_runtime_ready(false);
+  ha_pre_shutdown();
   mysql_server_end();
   return MDB_OK;
 
