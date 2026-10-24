@@ -1,12 +1,12 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { createEmbeddedMariaDb } from "../src/index.ts";
+import { createServer } from "../src/index.ts";
 
 test(
   "small tablespaces grow for larger fixtures without losing data",
   { timeout: 60000 },
   async () => {
-    const server = await createEmbeddedMariaDb();
+    const server = await createServer();
     try {
       const c = await server.connect();
       const size = async (name: string) => {

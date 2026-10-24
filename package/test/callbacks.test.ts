@@ -1,11 +1,11 @@
 import { test, before, after } from "node:test";
 import assert from "node:assert/strict";
-import { createEmbeddedMariaDb } from "../src/server.ts";
+import { createServer } from "../src/server.ts";
 import mysql from "../src/mysql2-callback.ts";
 import maria from "../src/mariadb-callback.ts";
-let server: Awaited<ReturnType<typeof createEmbeddedMariaDb>>;
+let server: Awaited<ReturnType<typeof createServer>>;
 before(async () => {
-  server = await createEmbeddedMariaDb();
+  server = await createServer();
 });
 after(async () => {
   await server.close();

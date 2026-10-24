@@ -1,4 +1,4 @@
-export { createEmbeddedMariaDb } from "./server.ts";
+export { createServer } from "./server.ts";
 export { MariaDbEmbeddedError, MariaDbEmbeddedStateError } from "./errors.ts";
 export type {
   ConversionOptions,

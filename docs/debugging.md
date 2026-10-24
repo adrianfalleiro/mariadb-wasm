@@ -6,7 +6,7 @@ The package buffers MariaDB's output and only surfaces it on failure. To stream
 it:
 
 ```ts
-const server = await createEmbeddedMariaDb({ debug: true });
+const server = await createServer({ debug: true });
 ```
 
 For the raw harnesses:
@@ -47,7 +47,7 @@ Module.FS.stat("/runtime/instance-0/ibdata1");
 To get real files you can inspect with ordinary tools, use host-backed storage:
 
 ```ts
-await createEmbeddedMariaDb({
+await createServer({
   storage: { type: "node", directory: "/tmp/mdb-debug" },
 });
 ```
@@ -55,7 +55,7 @@ await createEmbeddedMariaDb({
 ## Check for leaked handles and threads
 
 ```ts
-(server as any).liveHandles;   // { connections, results, statements }
+(server as any).liveHandles; // { connections, results, statements }
 ```
 
 All three must be 0 after every connection is closed. If Node will not exit

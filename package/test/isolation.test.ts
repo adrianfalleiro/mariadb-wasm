@@ -15,7 +15,7 @@ import { Worker } from "node:worker_threads";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
-import { createEmbeddedMariaDb } from "../src/index.ts";
+import { createServer } from "../src/index.ts";
 import type { EmbeddedMariaDbServer } from "../src/types.ts";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
@@ -28,7 +28,7 @@ describe("parallel isolation", () => {
          exercise the case where four instances are initialising at once,
          which is when a shared-state bug would actually show. */
     const servers: EmbeddedMariaDbServer[] = await Promise.all(
-      Array.from({ length: count }, () => createEmbeddedMariaDb({ storage: { type: "memory" } })),
+      Array.from({ length: count }, () => createServer({ storage: { type: "memory" } })),
     );
 
     try {
@@ -76,7 +76,7 @@ describe("parallel isolation", () => {
          old deadlock broke. Doing it repeatedly in one process also catches
          state leaking between instances. */
     for (let round = 0; round < 3; round++) {
-      const server = await createEmbeddedMariaDb();
+      const server = await createServer();
       const connection = await server.connect();
       await connection.query("CREATE DATABASE round_db");
       await connection.query("USE round_db");

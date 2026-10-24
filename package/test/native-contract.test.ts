@@ -4,7 +4,7 @@ import nativeMysql from "mysql2/promise";
 import nativeMaria from "mariadb";
 import mysql from "../src/mysql2.ts";
 import maria from "../src/mariadb.ts";
-import { createEmbeddedMariaDb } from "../src/server.ts";
+import { createServer } from "../src/server.ts";
 
 // The native server is disposable and supplied by the test runner, never a developer database.
 const port = Number(process.env.MYSQL_CONTRACT_PORT);
@@ -13,7 +13,7 @@ for (const kind of ["mysql2", "mariadb"] as const) {
     `${kind}: same observable contract as the official driver`,
     { skip: !port, timeout: 60000 },
     async () => {
-      const server = await createEmbeddedMariaDb();
+      const server = await createServer();
       const config = {
         dateStrings: true,
         timezone: "Z" as const,

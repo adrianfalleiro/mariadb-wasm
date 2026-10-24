@@ -47,7 +47,7 @@ export async function connectDriver(kind: "mysql2" | "mariadb", options: DriverO
   const server =
     options.server ??
     (typeof process !== "undefined" && process.versions?.node
-      ? await (await import("./server.ts")).createEmbeddedMariaDb(options.engine)
+      ? await (await import("./server.ts")).createServer(options.engine)
       : await (await import("./browser.ts")).createDatabaseWorker(options.engine));
   let connection: EngineConnection;
   try {

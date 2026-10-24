@@ -12,9 +12,9 @@ import { SCHEMA, SEED } from "./workload.mjs";
 /* --- embedded wasm ------------------------------------------------------- */
 
 export async function createEmbedded({ root }) {
-  const { createEmbeddedMariaDb } = await import(`${root}/package/src/index.ts`);
+  const { createServer } = await import(`${root}/package/src/index.ts`);
 
-  const server = await createEmbeddedMariaDb({ storage: { type: "memory" } });
+  const server = await createServer({ storage: { type: "memory" } });
   return createEmbeddedClient(server, true);
 }
 

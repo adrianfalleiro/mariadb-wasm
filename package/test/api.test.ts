@@ -7,7 +7,7 @@
 import assert from "node:assert/strict";
 import test, { after, before, describe } from "node:test";
 
-import { createEmbeddedMariaDb } from "../src/index.ts";
+import { createServer } from "../src/index.ts";
 import { MariaDbEmbeddedError, MariaDbEmbeddedStateError } from "../src/errors.ts";
 import type { EmbeddedMariaDbServer } from "../src/types.ts";
 
@@ -15,7 +15,7 @@ let server: EmbeddedMariaDbServer;
 
 before(
   async () => {
-    server = await createEmbeddedMariaDb({ storage: { type: "memory" } });
+    server = await createServer({ storage: { type: "memory" } });
   },
   { timeout: 120_000 },
 );
@@ -128,7 +128,7 @@ describe("type fidelity", () => {
   });
 
   test("honours conversion options", { timeout: 120_000 }, async () => {
-    const stringy = await createEmbeddedMariaDb({
+    const stringy = await createServer({
       bigIntMode: "string",
       decimalMode: "number",
       dateMode: "date",
@@ -422,7 +422,7 @@ describe("lifecycle", () => {
   });
 
   test("close is idempotent and refuses later use", { timeout: 120_000 }, async () => {
-    const disposable = await createEmbeddedMariaDb();
+    const disposable = await createServer();
     await disposable.close();
     await disposable.close();
     assert.equal(disposable.state, "CLOSED");

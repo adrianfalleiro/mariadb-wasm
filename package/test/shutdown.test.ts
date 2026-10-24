@@ -19,7 +19,7 @@
 import assert from "node:assert/strict";
 import test, { describe } from "node:test";
 
-import { createEmbeddedMariaDb } from "../src/index.ts";
+import { createServer } from "../src/index.ts";
 import type { EmbeddedMariaDbServer } from "../src/types.ts";
 
 /* shutdownWasClean and diagnostics are on the concrete Server, which is not
@@ -42,7 +42,7 @@ describe("shutdown", () => {
     "drains every MariaDB thread, and does not wait to find out",
     { timeout: 120_000 },
     async () => {
-      const server = inspect(await createEmbeddedMariaDb());
+      const server = inspect(await createServer());
 
       const connection = await server.connect();
       await connection.query("CREATE DATABASE shutdown_db");
@@ -74,7 +74,7 @@ describe("shutdown", () => {
     async () => {
       /* The reusable connection worker must unregister when closed, including
        after repeated prepare/execute calls. */
-      const server = inspect(await createEmbeddedMariaDb());
+      const server = inspect(await createServer());
 
       const connection = await server.connect();
       await connection.query("CREATE DATABASE stmt_db");

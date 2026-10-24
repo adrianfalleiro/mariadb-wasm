@@ -2,13 +2,13 @@ import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { test, before, after } from "node:test";
 import assert from "node:assert/strict";
-import { createEmbeddedMariaDb } from "../src/server.ts";
+import { createServer } from "../src/server.ts";
 import mysql from "../src/mysql2.ts";
 import maria from "../src/mariadb.ts";
 
-let server: Awaited<ReturnType<typeof createEmbeddedMariaDb>>;
+let server: Awaited<ReturnType<typeof createServer>>;
 before(async () => {
-  server = await createEmbeddedMariaDb();
+  server = await createServer();
 });
 after(async () => {
   await server.close();
@@ -118,7 +118,7 @@ test("driver rejects unsupported connection options instead of silently ignoring
 });
 
 test("concurrent server close drains work once", async () => {
-  const own = await createEmbeddedMariaDb();
+  const own = await createServer();
   const c = await own.connect();
   const query = c.run("SELECT 19 AS n");
   await Promise.all([own.close(), own.close()]);
@@ -140,8 +140,8 @@ test("numeric prepared parameters retain their SQL numeric type", async () => {
 
 test("failed startup releases threads and lets Node exit", { timeout: 10000 }, async () => {
   const moduleUrl = new URL("../src/server.ts", import.meta.url).href;
-  const script = `import(${JSON.stringify(moduleUrl)}).then(async ({createEmbeddedMariaDb}) => {
-   try { await createEmbeddedMariaDb({serverOptions: ['--not-a-real-server-option']}); process.exitCode = 1; }
+  const script = `import(${JSON.stringify(moduleUrl)}).then(async ({createServer}) => {
+   try { await createServer({serverOptions: ['--not-a-real-server-option']}); process.exitCode = 1; }
    catch (error) { if (!error.message.includes('mysql_server_init failed')) throw error; console.log('EXPECTED_START_FAILURE'); }
  });`;
   const { stdout } = await promisify(execFile)(process.execPath, ["--eval", script], {

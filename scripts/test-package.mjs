@@ -28,13 +28,13 @@ try {
     path.join(temp, "check.mjs"),
     `
 import assert from "node:assert/strict";
-import { createEmbeddedMariaDb } from "@adrianfalleiro/mariadb-wasm";
+import { createServer } from "@adrianfalleiro/mariadb-wasm";
 import mysql from "@adrianfalleiro/mariadb-wasm/mysql2/promise";
 import maria from "@adrianfalleiro/mariadb-wasm/mariadb";
 import callbacks from "@adrianfalleiro/mariadb-wasm/mysql2";
 import mariaCallbacks from "@adrianfalleiro/mariadb-wasm/mariadb/callback";
 import { createSharedDatabaseWorker } from "@adrianfalleiro/mariadb-wasm/shared";
-for (const create of [createEmbeddedMariaDb, createSharedDatabaseWorker]) {
+for (const create of [createServer, createSharedDatabaseWorker]) {
   const server = await create();
   try {
     const c = await mysql.createConnection({server});
@@ -60,11 +60,11 @@ console.log("Installed npm package: Node APIs and worker passed");
   await fs.writeFile(
     path.join(temp, "consumer.ts"),
     `
-import { createEmbeddedMariaDb } from "@adrianfalleiro/mariadb-wasm";
+import { createServer } from "@adrianfalleiro/mariadb-wasm";
 import { createSharedDatabaseWorker } from "@adrianfalleiro/mariadb-wasm/shared";
 import { createDatabaseWorker } from "@adrianfalleiro/mariadb-wasm/browser";
 import mysql from "@adrianfalleiro/mariadb-wasm/mysql2/promise";
-const db = await createEmbeddedMariaDb();
+const db = await createServer();
 const connection = await mysql.createConnection({server: db});
 await connection.query("SELECT 1");
 await connection.end();

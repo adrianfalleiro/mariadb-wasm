@@ -5,7 +5,7 @@
   functions, so it works with node:test, Vitest, Jest or Mocha without this
   package depending on any of them.
 */
-import { createEmbeddedMariaDb } from "./server.ts";
+import { createServer } from "./server.ts";
 import { MariaDbEmbeddedStateError } from "./errors.ts";
 import type {
   EmbeddedMariaDbConnection,
@@ -34,7 +34,7 @@ export function resetServerPerFile(options: EmbeddedMariaDbOptions = {}) {
 
   return {
     async setup(): Promise<EmbeddedMariaDbServer> {
-      server ??= await createEmbeddedMariaDb(options);
+      server ??= await createServer(options);
       return server;
     },
     /* Between tests: drop user schemas but keep the runtime. */
@@ -46,8 +46,7 @@ export function resetServerPerFile(options: EmbeddedMariaDbOptions = {}) {
       server = undefined;
     },
     get current(): EmbeddedMariaDbServer {
-      if (!server)
-        throw new MariaDbEmbeddedStateError("setup() has not run yet");
+      if (!server) throw new MariaDbEmbeddedStateError("setup() has not run yet");
       return server;
     },
   };
@@ -103,8 +102,7 @@ export function createSchemaPerTest(
   return {
     async setup() {
       const handle = await perTest.setup();
-      for (const statement of schemaStatements)
-        await handle.connection.query(statement);
+      for (const statement of schemaStatements) await handle.connection.query(statement);
       return handle;
     },
     teardown: perTest.teardown,

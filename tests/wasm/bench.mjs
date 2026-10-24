@@ -9,7 +9,7 @@
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
-import { createEmbeddedMariaDb } from "../../package/src/index.ts";
+import { createServer } from "../../package/src/index.ts";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const distDir = path.resolve(here, "..", "..", "dist");
@@ -36,12 +36,10 @@ for (const artifact of ["mariadb.mjs", "mariadb.wasm"]) {
 }
 
 const { result: server } = await time("server create (load + init)", () =>
-  createEmbeddedMariaDb({ storage: { type: "memory" } }),
+  createServer({ storage: { type: "memory" } }),
 );
 
-const { result: connection } = await time("first connection", () =>
-  server.connect(),
-);
+const { result: connection } = await time("first connection", () => server.connect());
 
 await time("first query", () => connection.query("SELECT 1"));
 
@@ -64,10 +62,7 @@ await time("1000 simple queries", async () => {
 
 await time("1000 prepared inserts", async () => {
   for (let i = 0; i < 1000; i++)
-    await connection.execute("INSERT INTO t(v, s) VALUES (?, ?)", [
-      i,
-      `row ${i}`,
-    ]);
+    await connection.execute("INSERT INTO t(v, s) VALUES (?, ?)", [i, `row ${i}`]);
 });
 
 await time("1000 inserts in one transaction", async () => {
@@ -83,8 +78,7 @@ await time("select 2000 rows", async () => {
 });
 
 await time("indexed point lookups (1000)", async () => {
-  for (let i = 1; i <= 1000; i++)
-    await connection.execute("SELECT v FROM t WHERE id = ?", [i]);
+  for (let i = 1; i <= 1000; i++) await connection.execute("SELECT v FROM t WHERE id = ?", [i]);
 });
 
 process.stdout.write(

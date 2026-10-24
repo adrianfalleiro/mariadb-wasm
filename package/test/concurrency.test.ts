@@ -9,7 +9,7 @@
 import assert from "node:assert/strict";
 import test, { after, before, describe } from "node:test";
 
-import { createEmbeddedMariaDb } from "../src/index.ts";
+import { createServer } from "../src/index.ts";
 import { MariaDbEmbeddedError } from "../src/errors.ts";
 import type { EmbeddedMariaDbConnection, EmbeddedMariaDbServer } from "../src/types.ts";
 
@@ -17,7 +17,7 @@ let server: EmbeddedMariaDbServer;
 
 before(
   async () => {
-    server = await createEmbeddedMariaDb({
+    server = await createServer({
       /* Short enough that a genuine hang fails the test quickly, long enough
        that a merely slow machine does not. */
       serverOptions: ["--innodb-lock-wait-timeout=5"],
@@ -92,7 +92,7 @@ describe("row locking", () => {
     { timeout: 120_000 },
     async () => {
       await seed([[1, 10]]);
-      const fast = await createEmbeddedMariaDb({
+      const fast = await createServer({
         serverOptions: ["--innodb-lock-wait-timeout=1"],
       });
       try {

@@ -1,4 +1,4 @@
-import { createEmbeddedMariaDb } from "./server.ts";
+import { createServer } from "./server.ts";
 import type { EmbeddedMariaDbServer, EmbeddedMariaDbConnection } from "./types.ts";
 import type { DatabaseEndpoint } from "./worker-client.ts";
 
@@ -70,7 +70,7 @@ export function serveDatabaseWorker(root: DatabaseEndpoint) {
           if (method === "init" && endpoint === root) {
             if (server || initializing) throw new Error("worker already initialized");
             initializing = true;
-            server = await createEmbeddedMariaDb(args[0]);
+            server = await createServer(args[0]);
           } else {
             if (!server) throw new Error("worker is not initialized");
             if (method === "attach" && endpoint === root) {

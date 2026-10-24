@@ -4,7 +4,7 @@ import { mkdtemp, writeFile, symlink, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { createEmbeddedMariaDb } from "../../package/src/server.ts";
+import { createServer } from "../../package/src/server.ts";
 import { SCHEMA, SEED, runTest } from "../../bench/workload.mjs";
 
 test(
@@ -22,7 +22,7 @@ test(
       );
       for (const name of ["share", "charsets", "datadir-template"])
         await symlink(fileURLToPath(new URL(name, dist)), join(dir, name));
-      server = await createEmbeddedMariaDb({ modulePath: join(dir, "mariadb.mjs") });
+      server = await createServer({ modulePath: join(dir, "mariadb.mjs") });
       const c = await server.connect();
       await c.query("CREATE DATABASE workload");
       await c.query("USE workload");

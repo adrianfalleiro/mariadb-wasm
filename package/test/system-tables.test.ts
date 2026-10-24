@@ -9,14 +9,14 @@
 import assert from "node:assert/strict";
 import test, { after, before, describe } from "node:test";
 
-import { createEmbeddedMariaDb } from "../src/index.ts";
+import { createServer } from "../src/index.ts";
 import type { EmbeddedMariaDbServer } from "../src/types.ts";
 
 let server: EmbeddedMariaDbServer;
 
 before(
   async () => {
-    server = await createEmbeddedMariaDb({ storage: { type: "memory" } });
+    server = await createServer({ storage: { type: "memory" } });
     const setup = await server.connect();
     await setup.query("CREATE DATABASE app");
     await setup.close();
@@ -165,7 +165,7 @@ describe("time zones", () => {
 
 describe("startup", () => {
   test("no longer complains about missing privilege tables", { timeout: 120_000 }, async () => {
-    const quiet = await createEmbeddedMariaDb();
+    const quiet = await createServer();
     try {
       const output = (quiet as unknown as { diagnostics: string }).diagnostics;
 

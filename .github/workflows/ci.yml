@@ -80,7 +80,7 @@ jobs:
           python3 - <<'PY'
           import pathlib, re, sys
           text = pathlib.Path("build/host/import_executables.cmake").read_text()
-          paths = re.findall(r'IMPORTED_LOCATION "([^"]+)"', text)
+          paths = re.findall(r'IMPORTED_LOCATION(?:_[A-Z0-9_]+)? "([^"]+)"', text)
           if not paths:
               sys.exit("no imported executables found")
           workspace = str(pathlib.Path.cwd().resolve())

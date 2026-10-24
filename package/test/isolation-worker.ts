@@ -9,11 +9,11 @@
 */
 import { parentPort, workerData } from "node:worker_threads";
 
-import { createEmbeddedMariaDb } from "../src/index.ts";
+import { createServer } from "../src/index.ts";
 
 const { id } = workerData as { id: number };
 
-const server = await createEmbeddedMariaDb({ storage: { type: "memory" } });
+const server = await createServer({ storage: { type: "memory" } });
 try {
   const connection = await server.connect();
   await connection.query("CREATE DATABASE worker_db");
@@ -21,8 +21,7 @@ try {
   await connection.query(
     "CREATE TABLE t (id INT NOT NULL AUTO_INCREMENT, PRIMARY KEY (id)) ENGINE=InnoDB",
   );
-  for (let row = 0; row < id; row++)
-    await connection.query("INSERT INTO t() VALUES ()");
+  for (let row = 0; row < id; row++) await connection.query("INSERT INTO t() VALUES ()");
 
   const [rows] = await connection.query("SELECT COUNT(*) AS n FROM t");
   parentPort?.postMessage(Number(rows[0].n));

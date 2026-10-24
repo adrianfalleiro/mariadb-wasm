@@ -168,7 +168,7 @@ class Server implements EmbeddedMariaDbServer {
     runtime. MariaDB's server init is process-global and mysql_server_end
     followed by another mysql_server_init is not a supported sequence, so a
     genuine restart means a new wasm instance — which is what close() plus
-    createEmbeddedMariaDb() gives you.
+    createServer() gives you.
 
     Correctness first, as the brief asks: this is the obvious implementation,
     not a clever one.
@@ -243,7 +243,7 @@ class Server implements EmbeddedMariaDbServer {
 /* Schemas MariaDB owns. Dropping any of these breaks the running server. */
 const RESERVED_SCHEMAS = new Set(["mysql", "information_schema", "performance_schema", "sys"]);
 
-export async function createEmbeddedMariaDb(
+export async function createServer(
   options: EmbeddedMariaDbOptions = {},
 ): Promise<EmbeddedMariaDbServer> {
   const runtime = await WasmRuntime.load({

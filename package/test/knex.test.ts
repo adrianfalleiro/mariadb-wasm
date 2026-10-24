@@ -1,7 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { createRequire } from "node:module";
-import { createEmbeddedMariaDb } from "../src/server.ts";
+import { createServer } from "../src/server.ts";
 import mysql from "../src/mysql2-callback.ts";
 import maria from "../src/mariadb-callback.ts";
 const require = createRequire(import.meta.url);
@@ -11,7 +11,7 @@ for (const [kind, driver] of [
   ["mariadb", maria],
 ] as const) {
   test(`${kind} callback driver runs Knex schema, pooling, transactions and errors`, async () => {
-    const server = await createEmbeddedMariaDb();
+    const server = await createServer();
     const admin = await server.connect();
     await admin.run("CREATE DATABASE knex_test");
     await admin.close();
