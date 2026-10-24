@@ -34,4 +34,4 @@ jobs:
       - name: Publish tested package
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
-        run: npm publish ./release/adrianfalleiro-mariadb-wasm-*.tgz --access public --provenance
+        run: npm publish ./release/adrianfalleiro-mariadb-wasm-*.tgz --access public --provenance=${{ !github.event.repository.private }}
