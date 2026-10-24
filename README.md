@@ -5,7 +5,7 @@ test suite can run real MariaDB — InnoDB, transactions, foreign keys, the
 actual optimizer — with no daemon, no port, no socket and no Docker.
 
 ```ts
-import { createEmbeddedMariaDb } from "@mariadb-wasm/embedded";
+import { createEmbeddedMariaDb } from "@adrianfalleiro/mariadb-wasm";
 
 const server = await createEmbeddedMariaDb({ storage: { type: "memory" } });
 const connection = await server.connect();
@@ -102,6 +102,29 @@ MariaDB still ships `libmariadbd`, is the documented migration path off
 `libmysqld`, and is the only one of the two with an upstream-supported
 cross-compilation flow (`IMPORT_EXECUTABLES`).
 
+## npm package
+
+Install with `npm install @adrianfalleiro/mariadb-wasm`. The package includes
+compiled JavaScript, TypeScript declarations, Node and browser WASM engines,
+the system-table template and license notices. No native build is needed.
+
+Browser applications must serve the files in `dist/browser/` together and
+provide COOP/COEP headers as described below. Pass `workerUrl` when your bundler
+does not preserve the worker assets beside the browser entrypoint.
+
+To prepare a release after building both engine targets:
+
+```sh
+npm run build:browser --prefix package
+npm run pack:npm --prefix package
+npm run test:package --prefix package
+npm run publish:npm --prefix package
+```
+
+The source-development package stays private to prevent accidentally publishing
+an incomplete checkout; publishing uses the self-contained `build/npm` directory.
+Bump `package/package.json` and its lockfile for each release.
+
 ## Build
 
 Pinned to MariaDB 11.8.9 (LTS) and emsdk 6.0.5. Requires `bison` 3.x (macOS
@@ -182,14 +205,14 @@ to each adapter. End each connection and then call `server.close()`.
 `[rows, fields]`. Node consumers use `package/src/mysql2.ts` or
 `package/src/mariadb.ts`; they reuse the Node engine without launching a browser.
 
-Callback entrypoints are `@mariadb-wasm/embedded/mysql2` and
-`@mariadb-wasm/embedded/mariadb/callback`. Their browser bundles are
+Callback entrypoints are `@adrianfalleiro/mariadb-wasm/mysql2` and
+`@adrianfalleiro/mariadb-wasm/mariadb/callback`. Their browser bundles are
 `mysql2-callback-driver.mjs` and `mariadb-callback-driver.mjs`.
 They return the connection immediately; queries wait for startup. They share
 binding, type conversion and error handling with the Promise adapters.
 
 ```js
-import mysql from "@mariadb-wasm/embedded/mysql2";
+import mysql from "@adrianfalleiro/mariadb-wasm/mysql2";
 
 const connection = mysql.createConnection({ server });
 connection.execute("SELECT ? AS answer", [42], (error, rows, fields) => {

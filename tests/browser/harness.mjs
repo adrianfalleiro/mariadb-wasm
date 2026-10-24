@@ -2,8 +2,7 @@ import { createServer } from "node:http";
 import { readFile } from "node:fs/promises";
 import { chromium } from "../../package/node_modules/playwright/index.mjs";
 
-export async function withBrowser(fn) {
-  const root = new URL("../../", import.meta.url);
+export async function withBrowser(fn, root = new URL("../../", import.meta.url)) {
   const server = createServer(async (req, res) => {
     if (req.url !== "/unisolated") res.setHeader("Cross-Origin-Opener-Policy", "same-origin");
     res.setHeader("Cross-Origin-Embedder-Policy", "require-corp");

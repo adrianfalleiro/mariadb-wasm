@@ -11,10 +11,16 @@ export function connectDatabasePort(port: NodeMessagePort) {
 
 export async function createSharedDatabaseWorker(options: EmbeddedMariaDbOptions = {}) {
   const { port1, port2 } = new MessageChannel();
-  const worker = new Worker(new URL("./node-worker-entry.ts", import.meta.url), {
-    workerData: { port: port2 },
-    transferList: [port2],
-  });
+  const worker = new Worker(
+    new URL(
+      import.meta.url.endsWith(".ts") ? "./node-worker-entry.ts" : "./node-worker-entry.js",
+      import.meta.url,
+    ),
+    {
+      workerData: { port: port2 },
+      transferList: [port2],
+    },
+  );
   const client = createWorkerClient(port1 as unknown as MessagePort, () => {
     port1.close();
     void worker.terminate();
